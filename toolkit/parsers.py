@@ -1,0 +1,403 @@
+import re
+import json
+from textwrap import dedent
+import ast
+import yaml
+from utils.extract_json import extract_json
+from utils.logger import logger
+from abc import ABC, abstractmethod
+from typing import TypeVar, Generic, List, Dict, Any, Protocol
+
+from llm.toolkit.output_normalizer import RawLLMOutput
+from utils.extract_yaml import extract_yaml
+from pydantic import ValidationError
+from processors.adr_processor.models.schemas import ConflictResult, ADRSearchResults
+from processors.adr_processor.models.schemas import ADRInfo, MatchedADR, FinalADRMatch, ADRSearchResults
+from processors.adr_processor.models.schemas import QuestionAnswer, QuestionAnswers
+
+T = TypeVar('T')
+
+class BaseParser(Protocol[T]):
+    @abstractmethod
+    def parse(self, raw: RawLLMOutput) -> T:
+        """Разбирает нормализованный вывод LLM в доменную модель T."""
+        ...
+
+class TextParser(BaseParser[str]):
+    """Парсер, возвращающий "как есть" текст ответа."""
+    def parse(self, raw: RawLLMOutput) -> str:
+        return raw.text
+
+class JsonParser(BaseParser[Dict[str, Any]]):
+    """Парсер JSON-ответов LLM."""
+    def parse(self, raw: RawLLMOutput) -> Dict[str, Any]:
+        try:
+            return json.loads(raw.text)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON: {e}")
+
+class YamlBlockParser(BaseParser[str], ABC):
+    """
+    Базовый парсер для YAML-блоков. Выделяет фрагмент через extract_yaml и возвращает чистый YAML.
+    """
+    def parse(self, raw: RawLLMOutput) -> str:
+        text = raw.text
+        snippet = self._preprocess(text)
+        return extract_yaml(snippet)
+
+    @abstractmethod
+    def _preprocess(self, text: str) -> str:
+        """Отсечение хвостов, заголовков и других служебных частей."""
+
+class DelimitedParser(BaseParser[str]):
+    """
+    Общий парсер, обрезающий ответ между заданными маркерами.
+    """
+    def __init__(self, start_pattern: str, end_patterns: List[str]):
+        self.start_pattern = start_pattern
+        self.end_patterns = end_patterns
+
+    def parse(self, raw: RawLLMOutput) -> str:
+        snippet = raw.text
+        # начало
+        m = re.search(self.start_pattern, snippet, flags=re.DOTALL)
+        if not m:
+            raise ValueError(f"Start token not found: {self.start_pattern}")
+        snippet = snippet[m.start():]
+        # конец
+        for pat in self.end_patterns:
+            m_end = re.search(pat, snippet)
+            if m_end:
+                snippet = snippet[: m_end.start()]
+                break
+        return snippet.strip()
+
+
+# Специализированные парсеры
+class ComponentsParser(YamlBlockParser):
+    """Парсит раздел components: из ответа и возвращает чистый YAML."""
+    _start_pattern = r"components:"
+    _end_tokens = [
+        r"\n---\n Powered by llm7\.io",
+        r"\n## Component List Ends here",
+        r"```"
+    ]
+
+    def _preprocess(self, text: str) -> str:
+        match = re.search(self._start_pattern, text, flags=re.IGNORECASE)
+        if not match:
+            raise ValueError("Ответ не содержит ключ 'components:'")
+        snippet = text[match.start():]
+        for pat in self._end_tokens:
+            m = re.search(pat, snippet)
+            if m:
+                snippet = snippet[:m.start()]
+                break
+        return snippet.strip()
+
+class AdrParser(BaseParser[List[Dict[str, str]]]):  # simple ADR entry model
+    """Парсит выход LLM в список ADR-записей."""
+    def parse(self, raw: RawLLMOutput) -> List[Dict[str, str]]:
+        markdown = raw.text
+        parts = re.split(r"(?m)^# ADR:", markdown)[1:]
+        adrs: List[Dict[str, str]] = []
+        for part in parts:
+            lines = part.strip().splitlines()
+            if not lines:
+                continue
+            title = lines[0].strip()
+            body = "\n".join(lines[1:]).strip()
+            adrs.append({"title": title, "body": body})
+        return adrs
+    
+class SystemContextParser(DelimitedParser):
+    """Парсит секцию System Context из Markdown-ответа."""
+    def __init__(self):
+        # Старт — заголовок System Context, конец — либо маркер, либо следующий заголовок
+        super().__init__(
+            start_pattern=r"(?mi)^#\s*System Context",
+            end_patterns=[
+                r"\n---\n Powered by llm7\.io"
+            ]
+        )
+
+class DataModelParser(YamlBlockParser):
+    """Парсит раздел entities: из ответа и возвращает чистый YAML с моделью данных."""
+    _start_pattern = r"entities:"
+    _end_tokens = [
+        r"\n---\n Powered by llm7\.io",
+        r"```"
+    ]
+
+    def _preprocess(self, text: str) -> str:
+        # Ищем начало entities
+        match = re.search(self._start_pattern, text, flags=re.IGNORECASE)
+        if not match:
+            raise ValueError("Ответ не содержит ключ 'entities:'")
+        snippet = text[match.start():]
+        # Отсекаем по известным маркерам конца
+        for pat in self._end_tokens:
+            m = re.search(pat, snippet)
+            if m:
+                snippet = snippet[:m.start()]
+                break
+        return snippet.strip()
+    
+class DfdParser(BaseParser[Dict[str, str]]):
+    """Парсит два блока DFD: diagram_file.mmd и traceability.md из Markdown-ответа."""
+    def parse(self, raw: RawLLMOutput) -> Dict[str, str]:
+        text = raw.text
+        # Проверка на наличие секции Final Answer
+        if not re.search(r"Final Answer", text, flags=re.DOTALL):
+            raise ValueError("Нет блока Final Answer")
+        # Определяем блоки
+        blocks = ["diagram_file.mmd", "traceability.md"]
+        positions: Dict[str, int] = {}
+        for block in blocks:
+            pattern = rf"(?m)^###\s*{re.escape(block)}"
+            match = re.search(pattern, text)
+            if not match:
+                raise ValueError(f"Missing block: ### {block}")
+            positions[block] = match.start()
+        # Сортируем блоки по позиции
+        sorted_blocks = sorted(positions.items(), key=lambda x: x[1])
+        first_block, first_pos = sorted_blocks[0]
+        second_block, second_pos = sorted_blocks[1]
+        snippet1 = text[first_pos:second_pos].strip()
+        snippet2 = text[second_pos:].strip()
+        return {
+            first_block: snippet1,
+            second_block: snippet2,
+        }
+    
+class FSMarkdownParser(BaseParser[Dict[str, str]]):
+    """Парсит Markdown с блоками stories.md, coverage_matrix.md и gap_analysis.yaml."""
+    def parse(self, raw: RawLLMOutput) -> Dict[str, str]:
+        text = raw.text
+        blocks = ["stories.md", "coverage_matrix.md", "gap_analysis.yaml"]
+        positions: Dict[str, int] = {}
+        for block in blocks:
+            pattern = rf"(?m)^###\s*{re.escape(block)}"
+            match = re.search(pattern, text)
+            if not match:
+                raise ValueError(f"Missing block: ### {block}")
+            positions[block] = match.start()
+        sorted_blocks = sorted(positions.items(), key=lambda x: x[1])
+        result: Dict[str, str] = {}
+        for i, (block, start) in enumerate(sorted_blocks):
+            end = sorted_blocks[i+1][1] if i+1 < len(sorted_blocks) else len(text)
+            snippet = text[start:end].strip()
+            if block.lower().endswith(".yaml"):
+                snippet = extract_yaml(snippet)
+            result[block] = snippet
+        return result
+    
+# Новый парсер для integration_view
+class IntegrationParser(YamlBlockParser):
+    """Парсит раздел integration_view: из ответа и возвращает чистый YAML."""
+    _start_pattern = r"integration_view:"
+    _end_tokens = [
+        r""""
+---
+ Powered by llm7\.io""",
+        r"```"
+    ]
+
+    def _preprocess(self, text: str) -> str:
+        # Ищем начало блока integration_view
+        match = re.search(self._start_pattern, text, flags=re.IGNORECASE)
+        if not match:
+            raise ValueError("Ответ не содержит ключ 'integration_view:'")
+        snippet = text[match.start():]
+        # Обрезаем по известным маркерам конца
+        for pat in self._end_tokens:
+            m = re.search(pat, snippet)
+            if m:
+                snippet = snippet[:m.start()]
+                break
+        return snippet.strip()
+    
+class LayeredFlowsParser(BaseParser[Any]):
+    """Парсит вывод агента Layered Flows, извлекая JSON-блок и возвращая структуру или YAML-словарь."""
+    def parse(self, raw: RawLLMOutput) -> Any:
+        text = raw.text
+        # Декодируем escape-последовательности
+        try:
+            decoded = bytes(text, 'utf-8').decode('unicode_escape')
+        except Exception:
+            decoded = text
+        decoded = dedent(decoded)
+        # Извлекаем JSON-блок
+        json_block = extract_json(decoded)
+        if not json_block:
+            logger.error('Не смог распарсить json-блок Layered Flows')
+            raise ValueError('JSON block not found')
+        # Чистим коды markdown и бэктики
+        cleaned = json_block.strip('`')
+        # Парсим JSON или AST
+        try:
+            meta = json.loads(cleaned)
+        except json.JSONDecodeError:
+            try:
+                meta = ast.literal_eval(cleaned)
+            except Exception as e:
+                logger.error(f"Can't parse JSON/AST: {e}")
+                raise ValueError('Invalid JSON/AST block')
+        # Ищем action_input или logical_view_result
+        ai = meta.get('action_input')
+        if isinstance(ai, dict):
+            return ai.get('logical_view_result', ai)
+        if isinstance(ai, str):
+            try:
+                return yaml.safe_load(dedent(ai))
+            except yaml.YAMLError as e:
+                logger.error(f"YAML parse error in action_input: {e}")
+                raise
+        lr = meta.get('logical_view_result')
+        if isinstance(lr, dict):
+            return lr
+        if isinstance(lr, str):
+            try:
+                return yaml.safe_load(dedent(lr))
+            except yaml.YAMLError as e:
+                logger.error(f"YAML parse error in logical_view_result: {e}")
+                raise
+        logger.error('Neither action_input nor logical_view_result yielded data')
+        raise ValueError('No usable data in Layered Flows response')
+    
+
+class UseCaseParser(YamlBlockParser):
+    """Парсит раздел integration_view: из ответа и возвращает чистый YAML."""
+    _start_pattern = r"use_cases:"
+    _end_tokens = [
+        r""""
+---
+ Powered by llm7\.io""",
+        r"```"
+    ]
+
+    def _preprocess(self, text: str) -> str:
+        # Ищем начало блока integration_view
+        match = re.search(self._start_pattern, text, flags=re.IGNORECASE)
+        if not match:
+            raise ValueError("Ответ не содержит ключ 'use_cases:'")
+        snippet = text[match.start():]
+        # Обрезаем по известным маркерам конца
+        for pat in self._end_tokens:
+            m = re.search(pat, snippet)
+            if m:
+                snippet = snippet[:m.start()]
+                break
+        return snippet.strip()
+    
+
+
+class ADRConflictParser(BaseParser[List[ConflictResult]]):
+    """Парсит список конфликтов ADR из JSON-ответа агента."""
+    def parse(self, raw: RawLLMOutput) -> List[ConflictResult]:
+        text = raw.text
+        # Попробуем загрузить JSON
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Не удалось распарсить JSON: {e}")
+
+        if not isinstance(data, list):
+            raise ValueError("Ожидался список объектов JSON")
+
+        results: List[ConflictResult] = []
+        for item in data:
+            if not isinstance(item, dict):
+                raise ValueError(f"Неверный формат элемента списка: {item}")
+            try:
+                results.append(ConflictResult(**item))
+            except ValidationError as e:
+                raise ValueError(f"Ошибка валидации элемента: {e}")
+        return results
+    
+class ADRSearchParser(BaseParser[ADRSearchResults]):
+    def __init__(self, available_adrs: List[dict]):
+        self.available_adrs = available_adrs
+
+    def parse(self, raw: RawLLMOutput) -> ADRSearchResults:
+        meta = extract_json(raw.text)
+        matched_raw = meta.get("matched_adrs", [])
+        if not isinstance(matched_raw, list):
+            matched_raw = []
+        matched_objs = []
+        for item in matched_raw:
+            if isinstance(item, dict):
+                try:
+                    matched_objs.append(MatchedADR(**item))
+                except ValidationError:
+                    continue
+
+        # собираем карту ADRInfo
+        adr_map = {}
+        for a in self.available_adrs:
+            if isinstance(a, dict) and a.get("adr_id"):
+                try:
+                    info = ADRInfo(**a)
+                    adr_map[info.adr_id] = info
+                except ValidationError:
+                    continue
+
+        results = []
+        for m in matched_objs:
+            info = adr_map.get(m.adr_id, ADRInfo(adr_id=m.adr_id))
+            results.append(
+                FinalADRMatch(
+                    adr_id=m.adr_id,
+                    title=info.title or "",
+                    compact_description=info.compact_description or "",
+                    relevance_score=m.relevance,
+                    match_reason=m.rationale,
+                )
+            )
+        return ADRSearchResults(matches=results)
+
+
+class ADRMatchParser(BaseParser[QuestionAnswers]):
+    def parse(self, raw: RawLLMOutput) -> QuestionAnswers:
+        data = extract_json(raw.text)
+
+        def is_qa(d: Any) -> bool:
+            return (
+                isinstance(d, dict)
+                and all(k in d for k in ("question", "answer", "confidence_score", "supporting_adrs"))
+            )
+
+        if is_qa(data):
+            items = [data]
+        elif isinstance(data, list):
+            items = data
+        else:
+            raise ValueError("Expected list of QA objects or single object")
+
+        answers = []
+        for obj in items:
+            if not is_qa(obj):
+                raise ValueError(f"Invalid QA item: {obj}")
+            answers.append(
+                QuestionAnswer(
+                    question=obj["question"],
+                    answer=obj["answer"],
+                    confidence_score=float(obj["confidence_score"]),
+                    supporting_adrs=obj["supporting_adrs"],
+                )
+            )
+        return QuestionAnswers(answers=answers)
+
+
+class TechStackParser(DelimitedParser):
+    """Парсит секцию Technology Stack из Markdown-ответа."""
+    def __init__(self):
+        super().__init__(
+            # Ищем заголовок «# Technology Stack»
+            start_pattern=r"(?mi)^#\s*Technology Stack",
+            # Обрезаем либо по маркеру Powered by, либо по следующему заголовку
+            end_patterns=[
+                r"\n---\n Powered by llm7\.io",
+                r"(?m)^#\s*(?!Technology Stack)"
+            ]
+        )
