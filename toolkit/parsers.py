@@ -139,7 +139,7 @@ class DataModelParser(BaseParser[str]):
                     data = ast.literal_eval(jblock)
                 except Exception:
                     pass
-            if isinstance(data, dict) and isinstance(data.get("entities"), list):
+            if isinstance(data, dict) and isinstance(data.get("entities"), (list, dict)):
                 return yaml.dump({"entities": data["entities"]},
                                  sort_keys=False, allow_unicode=True)
 
@@ -216,29 +216,48 @@ class FSMarkdownParser(BaseParser[Dict[str, str]]):
         return result
     
 # Новый парсер для integration_view
-class IntegrationParser(YamlBlockParser):
-    """Парсит раздел integration_view: из ответа и возвращает чистый YAML."""
-    _start_pattern = r"integration_view:"
-    _end_tokens = [
-        r""""
----
- Powered by llm7\.io""",
-        r"```"
-    ]
+class IntegrationParser(BaseParser[str]):
+    _fence = "```"
 
-    def _preprocess(self, text: str) -> str:
-        # Ищем начало блока integration_view
-        match = re.search(self._start_pattern, text, flags=re.IGNORECASE)
-        if not match:
-            raise ValueError("Ответ не содержит ключ 'integration_view:'")
-        snippet = text[match.start():]
-        # Обрезаем по известным маркерам конца
-        for pat in self._end_tokens:
-            m = re.search(pat, snippet)
-            if m:
-                snippet = snippet[:m.start()]
-                break
-        return snippet.strip()
+    def parse(self, raw: RawLLMOutput) -> str:
+        text = raw.text.strip()
+
+        # 1) Попытка JSON/Python-литерала
+        jblock = extract_bracketed_json(text)
+        if jblock:
+            data = None
+            try:
+                data = json.loads(jblock)
+            except Exception:
+                try:
+                    data = ast.literal_eval(jblock)
+                except Exception:
+                    pass
+            if isinstance(data, dict) and isinstance(data.get("integration_view"), (list, dict)):
+                return yaml.dump({"integration_view": data["integration_view"]},
+                                 sort_keys=False, allow_unicode=True)
+
+        # 2) Ищем YAML-фрагмент
+        m = re.search(r"(?i)(?:^|\W)integration_view\s*:", text)
+        if not m:
+            raise ValueError("Не найден ни JSON-массив 'integration_view', ни YAML-ключ 'integration_view:'")
+        snippet = text[m.start():]
+
+        # 3) Обрезаем всё после первого разделителя документа `---`
+        snippet = re.split(r"(?m)^---\s*$", snippet)[0]
+        # 4) Убираем any оставшиеся fences
+        snippet = snippet.split(self._fence)[0]
+
+        # 5) Чистим и форматируем через extract_yaml
+        clean = extract_yaml(snippet.strip())
+        # проверяем валидность
+        try:
+            doc = yaml.safe_load(clean)
+        except yaml.YAMLError as e:
+            raise ValueError(f"Ошибка парсинга YAML: {e}")
+        if not isinstance(doc, dict) or not isinstance(doc.get("integration_view"), list):
+            raise ValueError("В разобранном YAML нет списка 'integration_view'")
+        return clean
     
 class LayeredFlowsParser(BaseParser[Any]):
     """Парсит вывод агента Layered Flows, извлекая JSON-блок и возвращая структуру или YAML-словарь."""
