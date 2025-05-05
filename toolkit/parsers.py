@@ -3,7 +3,7 @@ import json
 from textwrap import dedent
 import ast
 import yaml
-from utils.extract_json import extract_json
+from utils.extract_json import extract_json, extract_bracketed_json
 from utils.logger import logger
 from abc import ABC, abstractmethod
 from typing import TypeVar, Generic, List, Dict, Any, Protocol
@@ -121,28 +121,51 @@ class SystemContextParser(DelimitedParser):
             ]
         )
 
-class DataModelParser(YamlBlockParser):
-    """Парсит раздел entities: из ответа и возвращает чистый YAML с моделью данных."""
-    _start_pattern = r"entities:"
-    _end_tokens = [
-        r"\n---\n Powered by llm7\.io",
-        r"```"
-    ]
 
-    def _preprocess(self, text: str) -> str:
-        # Ищем начало entities
-        match = re.search(self._start_pattern, text, flags=re.IGNORECASE)
-        if not match:
-            raise ValueError("Ответ не содержит ключ 'entities:'")
-        snippet = text[match.start():]
-        # Отсекаем по известным маркерам конца
-        for pat in self._end_tokens:
-            m = re.search(pat, snippet)
-            if m:
-                snippet = snippet[:m.start()]
-                break
-        return snippet.strip()
-    
+class DataModelParser(BaseParser[str]):
+    _fence = "```"
+
+    def parse(self, raw: RawLLMOutput) -> str:
+        text = raw.text.strip()
+
+        # 1) Попытка JSON/Python-литерала
+        jblock = extract_bracketed_json(text)
+        if jblock:
+            data = None
+            try:
+                data = json.loads(jblock)
+            except Exception:
+                try:
+                    data = ast.literal_eval(jblock)
+                except Exception:
+                    pass
+            if isinstance(data, dict) and isinstance(data.get("entities"), list):
+                return yaml.dump({"entities": data["entities"]},
+                                 sort_keys=False, allow_unicode=True)
+
+        # 2) Ищем YAML-фрагмент
+        m = re.search(r"(?i)(?:^|\W)entities\s*:", text)
+        if not m:
+            raise ValueError("Не найден ни JSON-массив 'entities', ни YAML-ключ 'entities:'")
+        snippet = text[m.start():]
+
+        # 3) Обрезаем всё после первого разделителя документа `---`
+        snippet = re.split(r"(?m)^---\s*$", snippet)[0]
+        # 4) Убираем any оставшиеся fences
+        snippet = snippet.split(self._fence)[0]
+
+        # 5) Чистим и форматируем через extract_yaml
+        clean = extract_yaml(snippet.strip())
+        # проверяем валидность
+        try:
+            doc = yaml.safe_load(clean)
+        except yaml.YAMLError as e:
+            raise ValueError(f"Ошибка парсинга YAML: {e}")
+        if not isinstance(doc, dict) or not isinstance(doc.get("entities"), list):
+            raise ValueError("В разобранном YAML нет списка 'entities'")
+        return clean
+
+
 class DfdParser(BaseParser[Dict[str, str]]):
     """Парсит два блока DFD: diagram_file.mmd и traceability.md из Markdown-ответа."""
     def parse(self, raw: RawLLMOutput) -> Dict[str, str]:

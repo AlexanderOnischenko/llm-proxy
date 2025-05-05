@@ -16,7 +16,12 @@ class OutputNormalizer:
     def normalize(resp: str | ChatResult | LLMResult) -> RawLLMOutput:
         if isinstance(resp, dict):
             # Если в словаре есть поле text или output, возьмём его, иначе — просто сериализуем весь dict
-            text = resp.get("text") or resp.get("output") or json.dumps(resp, ensure_ascii=False)
+            if resp.get("text"):
+                text = OutputNormalizer.normalize(resp.get("text")).text 
+            if resp.get("output"):
+                text = OutputNormalizer.normalize(resp.get("output")).text
+            else:
+                text = json.dumps(resp, ensure_ascii=False)
             return RawLLMOutput(text=text, raw=resp)
         if isinstance(resp, str):
             return RawLLMOutput(text=resp)
