@@ -79,7 +79,7 @@ class YamlBlockParser(BaseParser[str], ABC):
             doc = yaml.safe_load(clean)
         except yaml.YAMLError as e:
             raise ValueError(f"Ошибка парсинга YAML: {e}")
-        if not isinstance(doc, dict) or not isinstance(doc.get(self.key), list):
+        if not isinstance(doc, dict) or not isinstance(doc.get(self.key), (list,dict)):
             raise ValueError(f"В разобранном YAML нет списка '{self.key}'")
         return clean
 
@@ -99,7 +99,9 @@ class UseCaseParser(YamlBlockParser):
     def __init__(self):
         super().__init__(key="use_cases") 
 
-
+class LayeredFlowsParser(YamlBlockParser):
+    def __init__(self):
+        super().__init__(key="logical_view_result") 
 
 
 
@@ -206,59 +208,6 @@ class FSMarkdownParser(BaseParser[Dict[str, str]]):
             result[block] = snippet
         return result
     
-
-    
-class LayeredFlowsParser(BaseParser[Any]):
-    """Парсит вывод агента Layered Flows, извлекая JSON-блок и возвращая структуру или YAML-словарь."""
-    def parse(self, raw: RawLLMOutput) -> Any:
-        text = raw.text
-        # Декодируем escape-последовательности
-        try:
-            decoded = bytes(text, 'utf-8').decode('unicode_escape')
-        except Exception:
-            decoded = text
-        decoded = dedent(decoded)
-        # Извлекаем JSON-блок
-        json_block = extract_json(decoded)
-        if not json_block:
-            logger.error('Не смог распарсить json-блок Layered Flows')
-            raise ValueError('JSON block not found')
-        # Чистим коды markdown и бэктики
-        cleaned = json_block.strip('`')
-        # Парсим JSON или AST
-        try:
-            meta = json.loads(cleaned)
-        except json.JSONDecodeError:
-            try:
-                meta = ast.literal_eval(cleaned)
-            except Exception as e:
-                logger.error(f"Can't parse JSON/AST: {e}")
-                raise ValueError('Invalid JSON/AST block')
-        # Ищем action_input или logical_view_result
-        ai = meta.get('action_input')
-        if isinstance(ai, dict):
-            return ai.get('logical_view_result', ai)
-        if isinstance(ai, str):
-            try:
-                return yaml.safe_load(dedent(ai))
-            except yaml.YAMLError as e:
-                logger.error(f"YAML parse error in action_input: {e}")
-                raise
-        lr = meta.get('logical_view_result')
-        if isinstance(lr, dict):
-            return lr
-        if isinstance(lr, str):
-            try:
-                return yaml.safe_load(dedent(lr))
-            except yaml.YAMLError as e:
-                logger.error(f"YAML parse error in logical_view_result: {e}")
-                raise
-        logger.error('Neither action_input nor logical_view_result yielded data')
-        raise ValueError('No usable data in Layered Flows response')
-    
-
-
-
 
 class ADRConflictParser(BaseParser[List[ConflictResult]]):
     """Парсит список конфликтов ADR из JSON-ответа агента."""
