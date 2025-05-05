@@ -37,17 +37,71 @@ class JsonParser(BaseParser[Dict[str, Any]]):
             raise ValueError(f"Invalid JSON: {e}")
 
 class YamlBlockParser(BaseParser[str], ABC):
-    """
-    Базовый парсер для YAML-блоков. Выделяет фрагмент через extract_yaml и возвращает чистый YAML.
-    """
-    def parse(self, raw: RawLLMOutput) -> str:
-        text = raw.text
-        snippet = self._preprocess(text)
-        return extract_yaml(snippet)
+    _fence = "```"
 
-    @abstractmethod
-    def _preprocess(self, text: str) -> str:
-        """Отсечение хвостов, заголовков и других служебных частей."""
+    def __init__(self, key: str):
+        self.key = key
+    
+    def parse(self, raw: RawLLMOutput) -> str:
+        text = raw.text.strip()
+
+        # 1) Попытка JSON/Python-литерала
+        jblock = extract_bracketed_json(text)
+        if jblock:
+            data = None
+            try:
+                data = json.loads(jblock)
+            except Exception:
+                try:
+                    data = ast.literal_eval(jblock)
+                except Exception:
+                    pass
+            if isinstance(data, dict) and isinstance(data.get(self.key), (list, dict)):
+                return yaml.dump({self.key: data[self.key]},
+                                 sort_keys=False, allow_unicode=True)
+
+        # 2) Ищем YAML-фрагмент
+        escaped = re.escape(self.key)
+        m = re.search(rf"(?i)(?:^|\W){escaped}\s*:", text)
+        if not m:
+            raise ValueError(f"Не найден ни JSON-массив '{self.key}', ни YAML-ключ '{self.key}:'")
+        snippet = text[m.start():]
+
+        # 3) Обрезаем всё после первого разделителя документа `---`
+        snippet = re.split(r"(?m)^---\s*$", snippet)[0]
+        # 4) Убираем any оставшиеся fences
+        snippet = snippet.split(self._fence)[0]
+
+        # 5) Чистим и форматируем через extract_yaml
+        clean = extract_yaml(snippet.strip())
+        # проверяем валидность
+        try:
+            doc = yaml.safe_load(clean)
+        except yaml.YAMLError as e:
+            raise ValueError(f"Ошибка парсинга YAML: {e}")
+        if not isinstance(doc, dict) or not isinstance(doc.get(self.key), list):
+            raise ValueError(f"В разобранном YAML нет списка '{self.key}'")
+        return clean
+
+class ComponentsParser(YamlBlockParser):
+    def __init__(self):
+        super().__init__(key="components") 
+
+class IntegrationParser(YamlBlockParser):
+    def __init__(self):
+        super().__init__(key="integration_view")
+
+class DataModelParser(YamlBlockParser):
+    def __init__(self):
+        super().__init__(key="entities")
+
+class UseCaseParser(YamlBlockParser):
+    def __init__(self):
+        super().__init__(key="use_cases") 
+
+
+
+
 
 class DelimitedParser(BaseParser[str]):
     """
@@ -74,26 +128,7 @@ class DelimitedParser(BaseParser[str]):
 
 
 # Специализированные парсеры
-class ComponentsParser(YamlBlockParser):
-    """Парсит раздел components: из ответа и возвращает чистый YAML."""
-    _start_pattern = r"components:"
-    _end_tokens = [
-        r"\n---\n Powered by llm7\.io",
-        r"\n## Component List Ends here",
-        r"```"
-    ]
 
-    def _preprocess(self, text: str) -> str:
-        match = re.search(self._start_pattern, text, flags=re.IGNORECASE)
-        if not match:
-            raise ValueError("Ответ не содержит ключ 'components:'")
-        snippet = text[match.start():]
-        for pat in self._end_tokens:
-            m = re.search(pat, snippet)
-            if m:
-                snippet = snippet[:m.start()]
-                break
-        return snippet.strip()
 
 class AdrParser(BaseParser[List[Dict[str, str]]]):  # simple ADR entry model
     """Парсит выход LLM в список ADR-записей."""
@@ -120,50 +155,6 @@ class SystemContextParser(DelimitedParser):
                 r"\n---\n Powered by llm7\.io"
             ]
         )
-
-
-class DataModelParser(BaseParser[str]):
-    _fence = "```"
-
-    def parse(self, raw: RawLLMOutput) -> str:
-        text = raw.text.strip()
-
-        # 1) Попытка JSON/Python-литерала
-        jblock = extract_bracketed_json(text)
-        if jblock:
-            data = None
-            try:
-                data = json.loads(jblock)
-            except Exception:
-                try:
-                    data = ast.literal_eval(jblock)
-                except Exception:
-                    pass
-            if isinstance(data, dict) and isinstance(data.get("entities"), (list, dict)):
-                return yaml.dump({"entities": data["entities"]},
-                                 sort_keys=False, allow_unicode=True)
-
-        # 2) Ищем YAML-фрагмент
-        m = re.search(r"(?i)(?:^|\W)entities\s*:", text)
-        if not m:
-            raise ValueError("Не найден ни JSON-массив 'entities', ни YAML-ключ 'entities:'")
-        snippet = text[m.start():]
-
-        # 3) Обрезаем всё после первого разделителя документа `---`
-        snippet = re.split(r"(?m)^---\s*$", snippet)[0]
-        # 4) Убираем any оставшиеся fences
-        snippet = snippet.split(self._fence)[0]
-
-        # 5) Чистим и форматируем через extract_yaml
-        clean = extract_yaml(snippet.strip())
-        # проверяем валидность
-        try:
-            doc = yaml.safe_load(clean)
-        except yaml.YAMLError as e:
-            raise ValueError(f"Ошибка парсинга YAML: {e}")
-        if not isinstance(doc, dict) or not isinstance(doc.get("entities"), list):
-            raise ValueError("В разобранном YAML нет списка 'entities'")
-        return clean
 
 
 class DfdParser(BaseParser[Dict[str, str]]):
@@ -215,49 +206,7 @@ class FSMarkdownParser(BaseParser[Dict[str, str]]):
             result[block] = snippet
         return result
     
-# Новый парсер для integration_view
-class IntegrationParser(BaseParser[str]):
-    _fence = "```"
 
-    def parse(self, raw: RawLLMOutput) -> str:
-        text = raw.text.strip()
-
-        # 1) Попытка JSON/Python-литерала
-        jblock = extract_bracketed_json(text)
-        if jblock:
-            data = None
-            try:
-                data = json.loads(jblock)
-            except Exception:
-                try:
-                    data = ast.literal_eval(jblock)
-                except Exception:
-                    pass
-            if isinstance(data, dict) and isinstance(data.get("integration_view"), (list, dict)):
-                return yaml.dump({"integration_view": data["integration_view"]},
-                                 sort_keys=False, allow_unicode=True)
-
-        # 2) Ищем YAML-фрагмент
-        m = re.search(r"(?i)(?:^|\W)integration_view\s*:", text)
-        if not m:
-            raise ValueError("Не найден ни JSON-массив 'integration_view', ни YAML-ключ 'integration_view:'")
-        snippet = text[m.start():]
-
-        # 3) Обрезаем всё после первого разделителя документа `---`
-        snippet = re.split(r"(?m)^---\s*$", snippet)[0]
-        # 4) Убираем any оставшиеся fences
-        snippet = snippet.split(self._fence)[0]
-
-        # 5) Чистим и форматируем через extract_yaml
-        clean = extract_yaml(snippet.strip())
-        # проверяем валидность
-        try:
-            doc = yaml.safe_load(clean)
-        except yaml.YAMLError as e:
-            raise ValueError(f"Ошибка парсинга YAML: {e}")
-        if not isinstance(doc, dict) or not isinstance(doc.get("integration_view"), list):
-            raise ValueError("В разобранном YAML нет списка 'integration_view'")
-        return clean
     
 class LayeredFlowsParser(BaseParser[Any]):
     """Парсит вывод агента Layered Flows, извлекая JSON-блок и возвращая структуру или YAML-словарь."""
@@ -308,30 +257,7 @@ class LayeredFlowsParser(BaseParser[Any]):
         raise ValueError('No usable data in Layered Flows response')
     
 
-class UseCaseParser(YamlBlockParser):
-    """Парсит раздел integration_view: из ответа и возвращает чистый YAML."""
-    _start_pattern = r"use_cases:"
-    _end_tokens = [
-        r""""
----
- Powered by llm7\.io""",
-        r"```"
-    ]
 
-    def _preprocess(self, text: str) -> str:
-        # Ищем начало блока integration_view
-        match = re.search(self._start_pattern, text, flags=re.IGNORECASE)
-        if not match:
-            raise ValueError("Ответ не содержит ключ 'use_cases:'")
-        snippet = text[match.start():]
-        # Обрезаем по известным маркерам конца
-        for pat in self._end_tokens:
-            m = re.search(pat, snippet)
-            if m:
-                snippet = snippet[:m.start()]
-                break
-        return snippet.strip()
-    
 
 
 class ADRConflictParser(BaseParser[List[ConflictResult]]):
