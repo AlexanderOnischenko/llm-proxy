@@ -1,5 +1,5 @@
 from langchain.schema import LLMResult, ChatResult
-from typing import Any
+from typing import Any, List
 from dataclasses import dataclass
 import json
 
@@ -14,6 +14,14 @@ class OutputNormalizer:
     
     @staticmethod
     def normalize(resp: str | ChatResult | LLMResult) -> RawLLMOutput:
+                # Поддержка списка: нормализуем каждый элемент и соединяем через ",\n"
+        if isinstance(resp, list):
+            texts: List[str] = []
+            for item in resp:
+                item_text = OutputNormalizer.normalize(item).text
+                texts.append(item_text)
+            joined = ",\n".join(texts)
+            return RawLLMOutput(text=joined, raw=resp)
         if isinstance(resp, dict):
             # Если в словаре есть поле text или output, возьмём его, иначе — просто сериализуем весь dict
             if resp.get("text"):
