@@ -11,8 +11,9 @@ from typing import TypeVar, Generic, List, Dict, Any, Protocol
 from llm.toolkit.output_normalizer import RawLLMOutput
 from utils.extract_yaml import extract_yaml
 from pydantic import ValidationError
-from processors.adr_processor.models.schemas import ConflictResult, ADRSearchResults
-from processors.adr_processor.models.schemas import ADRInfo, MatchedADR, FinalADRMatch, ADRSearchResults
+from domain.models.adr import ADRInfo
+from processors.adr_processor.models.schemas import ConflictResult, RelevantADRList, RelevantADR
+from processors.adr_processor.models.schemas import MatchedADR
 from processors.adr_processor.models.schemas import QuestionAnswer, QuestionAnswers
 
 T = TypeVar('T')
@@ -231,12 +232,13 @@ class ADRConflictParser(BaseParser[List[ConflictResult]]):
             except ValidationError as e:
                 raise ValueError(f"Ошибка валидации элемента: {e}")
         return results
-    
-class ADRSearchParser(BaseParser[ADRSearchResults]):
+
+# Unused?
+class ADRSearchParser(BaseParser[RelevantADRList]):
     def __init__(self, available_adrs: List[dict]):
         self.available_adrs = available_adrs
 
-    def parse(self, raw: RawLLMOutput) -> ADRSearchResults:
+    def parse(self, raw: RawLLMOutput) -> RelevantADRList:
         meta = extract_json(raw.text)
         matched_raw = meta.get("matched_adrs", [])
         if not isinstance(matched_raw, list):
@@ -263,15 +265,15 @@ class ADRSearchParser(BaseParser[ADRSearchResults]):
         for m in matched_objs:
             info = adr_map.get(m.adr_id, ADRInfo(adr_id=m.adr_id))
             results.append(
-                FinalADRMatch(
+                RelevantADR(
                     adr_id=m.adr_id,
                     title=info.title or "",
-                    compact_description=info.compact_description or "",
+                    full_description=info.full_description,
                     relevance_score=m.relevance,
                     match_reason=m.rationale,
                 )
             )
-        return ADRSearchResults(matches=results)
+        return RelevantADRList(matches=results)
 
 
 class ADRMatchParser(BaseParser[QuestionAnswers]):
