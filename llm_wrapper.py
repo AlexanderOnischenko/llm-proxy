@@ -1,4 +1,3 @@
-import os
 import time
 import threading
 import sqlite3
@@ -6,7 +5,6 @@ import json
 import hashlib
 import pickle
 import asyncio
-import logging
 import inspect
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import List, Optional, AsyncIterator, Iterator, Any, Dict, Union
@@ -14,7 +12,8 @@ from typing import List, Optional, AsyncIterator, Iterator, Any, Dict, Union
 from langchain_core.callbacks.stdout import StdOutCallbackHandler
 from langchain_community.chat_models import ChatOpenAI
 from langchain.schema import HumanMessage, SystemMessage, AIMessage, BaseMessage
-from langchain.schema import LLMResult, ChatResult, PromptValue, ChatGeneration
+from langchain.schema import LLMResult, ChatResult, PromptValue
+from utils.logger import logger
 
 # ===========================
 # Вспомогательные функции и настройка логирования
@@ -43,7 +42,7 @@ CACHE_ENABLED = True
 CACHE_PATH    = "llm_cache.sqlite"
 CACHE_TTL     = 600000
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
 
 # ===========================
 # Менеджер потоков через ThreadPoolExecutor
@@ -66,7 +65,7 @@ class _QueueManager:
             call_args = ([flatten_list(args)],)
             call_fn = self._llm.generate
 
-        logging.info(f"Submitting {method} with args={call_args} kwargs={safe_kwargs}")
+        logger.debug(f"Submitting {method} with args={call_args} kwargs={safe_kwargs}")
         return self._executor.submit(call_fn, *call_args, **safe_kwargs)
 
     async def submit_async(self, method: str, *args, **kwargs) -> Any:
@@ -119,7 +118,7 @@ class CachedQueuedChatOpenAI(ChatOpenAI):
             with self._cache_lock:
                 self._conn.execute("DELETE FROM cache WHERE key=?", (key,))
                 self._conn.commit()
-            logging.info(f"[CACHE EXPIRED] {key}")
+            logger.info(f"[CACHE EXPIRED] {key}")
             return None
         return pickle.loads(val)
 
@@ -158,7 +157,7 @@ class CachedQueuedChatOpenAI(ChatOpenAI):
         if CACHE_ENABLED:
             cached = self._get_cached(key)
             if cached is not None:
-                logging.info("[CACHE HIT] predict")
+                logger.info("[CACHE HIT] predict")
                 return cached
         future = self._qm.submit(method, prompt, stop=stop, sender=sender)
         out = future.result()
@@ -172,7 +171,7 @@ class CachedQueuedChatOpenAI(ChatOpenAI):
         if CACHE_ENABLED:
             cached = self._get_cached(key)
             if cached is not None:
-                logging.info("[CACHE HIT] complete")
+                logger.info("[CACHE HIT] complete")
                 return cached
         future = self._qm.submit(method, prompt, stop=stop, sender=sender)
         out = future.result()
@@ -186,7 +185,7 @@ class CachedQueuedChatOpenAI(ChatOpenAI):
         if CACHE_ENABLED:
             cached = self._get_cached(key)
             if cached is not None:
-                logging.info("[CACHE HIT] batch")
+                logger.info("[CACHE HIT] batch")
                 return cached
         future = self._qm.submit(method, prompts, stop=stop, sender=sender)
         out = future.result()
@@ -215,7 +214,7 @@ class CachedQueuedChatOpenAI(ChatOpenAI):
         if CACHE_ENABLED:
             cached = self._get_cached(key)
             if cached is not None:
-                logging.info("[CACHE HIT] generate")
+                logger.info("[CACHE HIT] generate")
                 return cached
         future = self._qm.submit(
             method,
@@ -249,7 +248,7 @@ class CachedQueuedChatOpenAI(ChatOpenAI):
         if CACHE_ENABLED:
             cached = self._get_cached(key)
             if cached is not None:
-                logging.info("[CACHE HIT] stream")
+                logger.info("[CACHE HIT] stream")
                 yield from cached
                 return
         future = self._qm.submit(
@@ -287,7 +286,7 @@ class CachedQueuedChatOpenAI(ChatOpenAI):
         if CACHE_ENABLED:
             cached = self._get_cached(key)
             if cached is not None:
-                logging.info("[CACHE HIT] invoke")
+                logger.info("[CACHE HIT] invoke")
                 return cached
 
         future = self._qm.submit(
