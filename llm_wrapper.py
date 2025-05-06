@@ -388,7 +388,7 @@ def create_custom_llm(**kwargs) -> CachedQueuedChatOpenAI:
 
 _llm_instance = None
 
-def get_llm():
+def get_llm() -> CachedQueuedChatOpenAI:
     global _llm_instance
     if _llm_instance is None:
         _llm_instance = create_custom_llm()
