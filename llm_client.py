@@ -9,6 +9,7 @@ from langchain_core.prompts.chat import ChatPromptValue
 from langchain_core.messages.base import BaseMessage
 from langchain_core.messages.human import HumanMessage
 from langchain.schema import LLMResult, ChatResult
+import langchain_core.outputs.chat_result
 
 
 
@@ -186,5 +187,5 @@ class RemoteLLM(BaseLanguageModel):
         return ChatResult(generations=flat, llm_output=lm_res.llm_output)
 
 
-def get_llm():
+def get_llm() -> RemoteLLM:
     return RemoteLLM()
