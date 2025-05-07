@@ -36,7 +36,7 @@ class JsonParser(BaseParser[Dict[str, Any]]):
             return json.loads(raw.text)
         except json.JSONDecodeError as e:
             raise ValueError(f"Invalid JSON: {e}")
-
+    
 class YamlBlockParser(BaseParser[str], ABC):
     _fence = "```"
 
