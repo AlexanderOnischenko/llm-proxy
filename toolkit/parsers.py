@@ -16,11 +16,11 @@ from processors.adr_processor.models.schemas import ConflictResult, RelevantADRL
 from processors.adr_processor.models.schemas import MatchedADR
 from processors.adr_processor.models.schemas import QuestionAnswer, QuestionAnswers
 
-T = TypeVar('T')
+T_co = TypeVar('T_co', covariant=True)
 
-class BaseParser(Protocol[T]):
+class BaseParser(Protocol[T_co]):
     @abstractmethod
-    def parse(self, raw: RawLLMOutput) -> T:
+    def parse(self, raw: RawLLMOutput) -> T_co:
         """Разбирает нормализованный вывод LLM в доменную модель T."""
         ...
 
