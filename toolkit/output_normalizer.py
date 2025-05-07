@@ -24,9 +24,9 @@ class OutputNormalizer:
             return RawLLMOutput(text=joined, raw=resp)
         if isinstance(resp, dict):
             # Если в словаре есть поле text или output, возьмём его, иначе — просто сериализуем весь dict
-            if resp.get("text"):
+            if "text" in resp:
                 text = OutputNormalizer.normalize(resp.get("text")).text 
-            if resp.get("output"):
+            elif "output" in resp:
                 text = OutputNormalizer.normalize(resp.get("output")).text
             else:
                 text = json.dumps(resp, ensure_ascii=False)
