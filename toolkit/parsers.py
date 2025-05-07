@@ -1,12 +1,12 @@
 import re
 import json
-from textwrap import dedent
 import ast
 import yaml
 from utils.extract_json import extract_json, extract_bracketed_json
 from utils.logger import logger
 from abc import ABC, abstractmethod
-from typing import TypeVar, Generic, List, Dict, Any, Protocol
+from typing import TypeVar, Generic, List, Dict, Any, Protocol, Union
+from tests.crash_logger import crash_logger
 
 from llm.toolkit.output_normalizer import RawLLMOutput
 from utils.extract_yaml import extract_yaml
@@ -23,6 +23,7 @@ class BaseParser(Protocol[T_co]):
     def parse(self, raw: RawLLMOutput) -> T_co:
         """Разбирает нормализованный вывод LLM в доменную модель T."""
         ...
+
 
 class TextParser(BaseParser[str]):
     """Парсер, возвращающий "как есть" текст ответа."""
@@ -211,27 +212,42 @@ class FSMarkdownParser(BaseParser[Dict[str, str]]):
     
 
 class ADRConflictParser(BaseParser[List[ConflictResult]]):
-    """Парсит список конфликтов ADR из JSON-ответа агента."""
+    
+    @crash_logger("adr_conflict_parser")
     def parse(self, raw: RawLLMOutput) -> List[ConflictResult]:
-        text = raw.text
-        # Попробуем загрузить JSON
-        try:
-            data = json.loads(text)
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Не удалось распарсить JSON: {e}")
+        text = raw.text or ""
+        # Пустой или только пробельный ввод → нет конфликтов
+        if not text.strip():
+            return []
 
-        if not isinstance(data, list):
-            raise ValueError("Ожидался список объектов JSON")
+        # Парсим JSON/AST-блок из текста
+        try:
+            data = extract_json(text)
+        except ValueError:
+            # не нашли/не смогли распарсить JSON → считаем, что конфликтов нет
+            return []
+
+        # Нормализуем данные к списку словарей
+        if isinstance(data, dict):
+            items = [data]
+        elif isinstance(data, list):
+            items = data
+        else:
+            raise ValueError("Ожидался список или объект JSON для ADR конфликтов")
 
         results: List[ConflictResult] = []
-        for item in data:
+        for item in items:
             if not isinstance(item, dict):
-                raise ValueError(f"Неверный формат элемента списка: {item}")
+                # пропускаем всё, что не словарь
+                logger.error(f"Неверный формат ConflictResult: {str(item)}")
+                continue
             try:
                 results.append(ConflictResult(**item))
             except ValidationError as e:
-                raise ValueError(f"Ошибка валидации элемента: {e}")
+                raise ValueError(f"Ошибка валидации элемента ADRConflict: {e}") from e
+
         return results
+
 
 # Unused?
 class ADRSearchParser(BaseParser[RelevantADRList]):
