@@ -53,7 +53,16 @@ class YamlBlockParser(BaseParser[str], ABC):
             return raw.text.strip()
     
     def postprocess(self, data: Any ) -> Any:
-        return data
+        # normalize casing
+        if self.key not in data:
+            for k in list(data):
+                if k.lower() == self.key:
+                    data[self.key] = data.pop(k)
+                    break
+
+        if not isinstance(data.get(self.key), (list,dict)):
+            raise ValueError(f"В разобранном YAML нет списка '{self.key}'")
+        return data  # no dump here!
     
     @crash_logger("yaml_parser")
     def parse(self, raw: RawLLMOutput) -> str:
@@ -113,19 +122,6 @@ class ComponentsParser(YamlBlockParser):
             return ""
         # в остальных случаях — просто обрежем пробелы
         return text.strip()
-    
-    def postprocess(self, data: Any) -> Any:
-        # normalize casing
-        if self.key not in data:
-            for k in list(data):
-                if k.lower() == self.key:
-                    data[self.key] = data.pop(k)
-                    break
-
-        if not isinstance(data.get(self.key), list):
-            raise ValueError(f"В разобранном YAML нет списка '{self.key}'")
-
-        return data  # no dump here!
 
 
 class IntegrationParser(YamlBlockParser):
