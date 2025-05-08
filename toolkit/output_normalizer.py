@@ -2,6 +2,7 @@ from langchain.schema import LLMResult, ChatResult
 from typing import Any, List
 from dataclasses import dataclass
 import json
+import re
 
 @dataclass
 class RawLLMOutput:
@@ -32,7 +33,20 @@ class OutputNormalizer:
                 text = json.dumps(resp, ensure_ascii=False)
             return RawLLMOutput(text=text, raw=resp)
         if isinstance(resp, str):
-            return RawLLMOutput(text=resp)
+            t = resp
+            # 1) Убираем префикс Final Answer:
+            t = re.sub(r'(?mi)^\s*final answer:','', t).strip()
+            # 2) Убираем любые кодовые fence-блоки ```…``` целиком
+            t = re.sub(r'```[\s\S]*?```', '', t).strip()
+            # 3) Снимаем оставшиеся одиночные fence до конца текста:
+            t = re.sub(r'```[\s\S]*$', '', t).strip()
+            # 4) Убираем одиночные или двойные кавычки вокруг
+            t = t.strip("'\"").strip()
+            # 5) Если после всех этих шагов ничего не осталось – считаем пустым
+            if not t:
+                return RawLLMOutput(text="")
+            else:
+                return RawLLMOutput(text=t)
         if isinstance(resp, ChatResult):
             return RawLLMOutput(
                 text=resp.generations[0].text,
