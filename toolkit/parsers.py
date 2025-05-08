@@ -150,7 +150,7 @@ class MultiDocParser:
         # Регэксп для разделителя документов `---` на своей строке
         self.doc_sep = re.compile(r'(?m)^---\s*$')
         # Регэксп для удаления fence-блоков ``` или ```yaml
-        self.fence_re = re.compile(r'```(?:yaml)?\s*|\s*```')
+        self.fence_re = re.compile(r'(?m)^```(?:yaml)?\s*$')
 
     def split_docs(self, text: str) -> List[str]:
         parts = self.doc_sep.split(text)
@@ -160,7 +160,10 @@ class MultiDocParser:
 
     def clean_doc(self, doc: str) -> str:
         # Убираем fence-блоки и лишние пробелы
-        return self.fence_re.sub('', doc).strip()
+        return '\n'.join(
+            line for line in doc.splitlines()
+            if not self.fence_re.match(line)
+        ).strip()
 
     @crash_logger("api_parser")
     def parse(self, raw: RawLLMOutput) -> Dict[str, Any]:
@@ -179,7 +182,7 @@ class MultiDocParser:
             clean = self.clean_doc(part)
             for key in keys:
                 if key in part:
-                    if key == 'pythonSpec':
+                    if 'pythonSpec' in part:
                         # Извлекаем весь текст после метки "pythonSpec:" (включая отступы)
                         # Предполагаем формат "pythonSpec: |\n<код>"
                         match = re.search(r'^pythonSpec\s*:\s*\|\s*\n', clean, flags=re.MULTILINE)
@@ -189,14 +192,10 @@ class MultiDocParser:
                         else:
                             # Если нет литерала, возвращаем всё после двоеточия
                             parts_line = clean.split(':', 1)
-                            result[key] = parts_line[1].strip() if len(parts_line) > 1 else ''
-                        continue
-                    parsed = extract_yaml_new(clean)
-                    if key == 'openapi':
-                        # Вторая часть — чистый OpenAPI-объект
-                        result[key] = parsed
+                            result[key] = parts_line[1].strip() if len(parts_line) > 1 else '' 
                         break
                     else:
+                        parsed = extract_yaml_new(clean)
                         result[key] = parsed[key]
                         break
         return result
