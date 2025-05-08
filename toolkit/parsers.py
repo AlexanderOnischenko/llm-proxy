@@ -9,7 +9,7 @@ from typing import TypeVar, Generic, List, Dict, Any, Protocol, Union
 from tests.crash_logger import crash_logger
 
 from llm.toolkit.output_normalizer import RawLLMOutput
-from utils.extract_yaml import extract_yaml, extract_yaml_new
+from utils.extract_yaml import extract_yaml, extract_yaml_new, dump_yaml
 from pydantic import ValidationError
 from domain.models.adr import ADRInfo
 from processors.adr_processor.models.schemas import ConflictResult, RelevantADRList, RelevantADR
@@ -37,11 +37,7 @@ class JsonParser(BaseParser[Dict[str, Any]]):
             return json.loads(raw.text)
         except json.JSONDecodeError as e:
             raise ValueError(f"Invalid JSON: {e}")
-        
-class IndentDumper(yaml.Dumper):
-    # запрещаем indentless-режим
-    def increase_indent(self, flow=False, indentless=False):
-        return super().increase_indent(flow, indentless=False)
+    
     
 class YamlBlockParser(BaseParser[str], ABC):
     fence = "```"
@@ -87,8 +83,7 @@ class YamlBlockParser(BaseParser[str], ABC):
                 except Exception:
                     pass
             if isinstance(data, dict) and isinstance(data.get(self.key), (list, dict)):
-                return yaml.dump({self.key: data[self.key]},
-                                 sort_keys=False, allow_unicode=True)
+                return dump_yaml({self.key: data[self.key]})
 
         # 2) Ищем YAML-фрагмент
         escaped = re.escape(self.key)
@@ -108,15 +103,8 @@ class YamlBlockParser(BaseParser[str], ABC):
         clean_doc = extract_yaml_new(snippet.strip())
         
         doc = self.postprocess(clean_doc)
-        text = yaml.dump(
-            doc,
-            Dumper=IndentDumper,      
-            sort_keys=False,
-            allow_unicode=True,
-            default_flow_style=False,
-            indent=2,                 # глубина содержимого
-        )
-        return text
+
+        return dump_yaml(doc)
 
 class ComponentsParser(YamlBlockParser):
     def __init__(self):
