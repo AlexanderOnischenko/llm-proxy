@@ -9,7 +9,7 @@ from typing import TypeVar, Generic, List, Dict, Any, Protocol, Union
 from tests.crash_logger import crash_logger
 
 from llm.toolkit.output_normalizer import RawLLMOutput
-from utils.extract_yaml import extract_yaml, extract_yaml_new, dump_yaml
+from utils.extract_yaml import extract_yaml_new, dump_yaml
 from pydantic import ValidationError
 from domain.models.adr import ADRInfo
 from processors.adr_processor.models.schemas import ConflictResult, RelevantADRList, RelevantADR
@@ -133,7 +133,73 @@ class UseCaseParser(YamlBlockParser):
 
 class LayeredFlowsParser(YamlBlockParser):
     def __init__(self):
-        super().__init__(key="logical_view_result") 
+        super().__init__(key="logical_view_result")
+
+
+class MultiDocParser:
+    """
+    Парсер .yaml-файла с мультidocument, выбирает первые четыре части:
+    1) metadata
+    2) openapi
+    3) pythonSpec
+    4) notes
+    Все дополнительные документы отбрасываются.
+    Каждый фрагмент очищается от ```yaml```/``` и передаётся в extract_yaml.
+    """
+    def __init__(self):
+        # Регэксп для разделителя документов `---` на своей строке
+        self.doc_sep = re.compile(r'(?m)^---\s*$')
+        # Регэксп для удаления fence-блоков ``` или ```yaml
+        self.fence_re = re.compile(r'```(?:yaml)?\s*|\s*```')
+
+    def split_docs(self, text: str) -> List[str]:
+        parts = self.doc_sep.split(text)
+        # Убираем пустые фрагменты
+        parts = [p for p in parts if p.strip()]
+        return parts
+
+    def clean_doc(self, doc: str) -> str:
+        # Убираем fence-блоки и лишние пробелы
+        return self.fence_re.sub('', doc).strip()
+
+    @crash_logger("api_parser")
+    def parse(self, raw: RawLLMOutput) -> Dict[str, Any]:
+        """
+        Возвращает dict с ключами:
+          - metadata   (dict)
+          - openapi    (dict)
+          - pythonSpec (raw str или parsed структура)
+          - notes      (list)
+        """
+        parts = self.split_docs(raw.text)
+        keys = ['metadata', 'openapi', 'pythonSpec', 'notes']
+        result: Dict[str, Any] = {}
+
+        for part in parts:
+            clean = self.clean_doc(part)
+            for key in keys:
+                if key in part:
+                    if key == 'pythonSpec':
+                        # Извлекаем весь текст после метки "pythonSpec:" (включая отступы)
+                        # Предполагаем формат "pythonSpec: |\n<код>"
+                        match = re.search(r'^pythonSpec\s*:\s*\|\s*\n', clean, flags=re.MULTILINE)
+                        if match:
+                            code_text = clean[match.end():]
+                            result[key] = code_text.rstrip()
+                        else:
+                            # Если нет литерала, возвращаем всё после двоеточия
+                            parts_line = clean.split(':', 1)
+                            result[key] = parts_line[1].strip() if len(parts_line) > 1 else ''
+                        continue
+                    parsed = extract_yaml_new(clean)
+                    if key == 'openapi':
+                        # Вторая часть — чистый OpenAPI-объект
+                        result[key] = parsed
+                        break
+                    else:
+                        result[key] = parsed[key]
+                        break
+        return result
 
 
 
@@ -236,8 +302,8 @@ class FSMarkdownParser(BaseParser[Dict[str, str]]):
             end = sorted_blocks[i+1][1] if i+1 < len(sorted_blocks) else len(text)
             snippet = text[start:end].strip()
             if block.lower().endswith(".yaml"):
-                snippet = extract_yaml(snippet)
-            result[block] = snippet
+                snippet = extract_yaml_new(snippet)
+            result[block] = dump_yaml(snippet)
         return result
     
 
