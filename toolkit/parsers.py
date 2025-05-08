@@ -9,7 +9,7 @@ from typing import TypeVar, Generic, List, Dict, Any, Protocol, Union
 from tests.crash_logger import crash_logger
 
 from llm.toolkit.output_normalizer import RawLLMOutput
-from utils.extract_yaml import extract_yaml
+from utils.extract_yaml import extract_yaml, extract_yaml_new
 from pydantic import ValidationError
 from domain.models.adr import ADRInfo
 from processors.adr_processor.models.schemas import ConflictResult, RelevantADRList, RelevantADR
@@ -39,14 +39,28 @@ class JsonParser(BaseParser[Dict[str, Any]]):
             raise ValueError(f"Invalid JSON: {e}")
     
 class YamlBlockParser(BaseParser[str], ABC):
-    _fence = "```"
+    fence = "```"
+    doc_sep_pattern = re.compile(r"(?m)^---\s*$")
+    section_pattern = re.compile(r"(?m)^##\s+")
 
     def __init__(self, key: str):
         self.key = key
     
+    def preprocess(self, raw: RawLLMOutput) -> str:
+        if isinstance(raw, str):
+            return raw
+        else:
+            return raw.text.strip()
+    
+    def postprocess(self, data: Any ) -> Any:
+        return data
+    
+    @crash_logger("yaml_parser")
     def parse(self, raw: RawLLMOutput) -> str:
-        text = raw.text.strip()
-
+        text = self.preprocess(raw)
+        if not text.strip():
+            return ""
+        
         # 1) Попытка JSON/Python-литерала
         jblock = extract_bracketed_json(text)
         if jblock:
@@ -64,30 +78,55 @@ class YamlBlockParser(BaseParser[str], ABC):
 
         # 2) Ищем YAML-фрагмент
         escaped = re.escape(self.key)
-        m = re.search(rf"(?i)(?:^|\W){escaped}\s*:", text)
+        m = re.search(rf"(?im)(?<!\S){escaped}\s*:", text)
         if not m:
             raise ValueError(f"Не найден ни JSON-массив '{self.key}', ни YAML-ключ '{self.key}:'")
         snippet = text[m.start():]
 
-        # 3) Обрезаем всё после первого разделителя документа `---`
-        snippet = re.split(r"(?m)^---\s*$", snippet)[0]
-        # 4) Убираем any оставшиеся fences
-        snippet = snippet.split(self._fence)[0]
+        # 3) обрезаем по первому `---`
+        snippet = self.doc_sep_pattern.split(snippet)[0]
+        # 4) обрезаем по первому заголовку `## …`
+        snippet = self.section_pattern.split(snippet)[0]
+        # 5) убираем любой оставшийся fence
+        snippet = snippet.split(self.fence)[0]
 
-        # 5) Чистим и форматируем через extract_yaml
-        clean = extract_yaml(snippet.strip())
-        # проверяем валидность
-        try:
-            doc = yaml.safe_load(clean)
-        except yaml.YAMLError as e:
-            raise ValueError(f"Ошибка парсинга YAML: {e}")
-        if not isinstance(doc, dict) or not isinstance(doc.get(self.key), (list,dict)):
-            raise ValueError(f"В разобранном YAML нет списка '{self.key}'")
-        return clean
+        # 6) Чистим и форматируем через extract_yaml
+        clean_doc = extract_yaml_new(snippet.strip())
+        
+        doc = self.postprocess(clean_doc)
+        return yaml.dump(
+            doc,
+            sort_keys=False,
+            allow_unicode=True,
+            default_flow_style=False,
+            indent=2,
+        )
 
 class ComponentsParser(YamlBlockParser):
     def __init__(self):
         super().__init__(key="components") 
+    
+    def preprocess(self, raw: RawLLMOutput) -> str:
+        text = super().preprocess(raw)
+        # если явный маркер «ничего не надо обновлять» — вернём пустую строку
+        if "NO_COMPONENTS_TO_UPDATE" in text:
+            return ""
+        # в остальных случаях — просто обрежем пробелы
+        return text.strip()
+    
+    def postprocess(self, data: Any) -> Any:
+        # normalize casing
+        if self.key not in data:
+            for k in list(data):
+                if k.lower() == self.key:
+                    data[self.key] = data.pop(k)
+                    break
+
+        if not isinstance(data.get(self.key), list):
+            raise ValueError(f"В разобранном YAML нет списка '{self.key}'")
+
+        return data  # no dump here!
+
 
 class IntegrationParser(YamlBlockParser):
     def __init__(self):

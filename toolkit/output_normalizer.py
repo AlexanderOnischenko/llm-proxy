@@ -3,6 +3,9 @@ from typing import Any, List
 from dataclasses import dataclass
 import json
 import re
+import textwrap
+from utils.unicode_utils import maybe_unicode_unescape
+
 
 @dataclass
 class RawLLMOutput:
@@ -11,11 +14,10 @@ class RawLLMOutput:
     raw: Any = None          # исходный ChatResult, если нужен
 
 class OutputNormalizer:
-    """Приводит str, ChatResult, LLMResult к RawLLMOutput."""
-    
+    """Приводит str, ChatResult, LLMResult к RawLLMOutput."""  
     @staticmethod
-    def normalize(resp: str | ChatResult | LLMResult) -> RawLLMOutput:
-                # Поддержка списка: нормализуем каждый элемент и соединяем через ",\n"
+    def normalize_recursive(resp: str | ChatResult | LLMResult) -> RawLLMOutput:
+        # Поддержка списка: нормализуем каждый элемент и соединяем через ",\n"
         if isinstance(resp, list):
             texts: List[str] = []
             for item in resp:
@@ -60,3 +62,19 @@ class OutputNormalizer:
                 raw=resp,
             )
         raise TypeError(f"Unsupported type: {type(resp)}")
+    
+    @staticmethod
+    def normalize(resp: str | ChatResult | LLMResult) -> RawLLMOutput:
+        llm_output_raw = OutputNormalizer.normalize_recursive(resp)
+        # 2) Декодируем экранированные последовательности сразу:
+        try:
+            text = maybe_unicode_unescape(text)
+        except Exception:
+            return llm_output_raw
+        # 3) Продолжаем уже существующие шаги очистки:
+        text = textwrap.dedent(text).strip()
+        return RawLLMOutput(
+            text=text, 
+            finish_reason=llm_output_raw.finish_reason,
+            raw = llm_output_raw.raw,
+            )
