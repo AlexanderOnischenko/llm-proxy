@@ -28,9 +28,9 @@ class OutputNormalizer:
         if isinstance(resp, dict):
             # Если в словаре есть поле text или output, возьмём его, иначе — просто сериализуем весь dict
             if "text" in resp:
-                text = OutputNormalizer.normalize(resp.get("text")).text 
+                text = OutputNormalizer.normalize_recursive(resp.get("text")).text 
             elif "output" in resp:
-                text = OutputNormalizer.normalize(resp.get("output")).text
+                text = OutputNormalizer.normalize_recursive(resp.get("output")).text
             else:
                 text = json.dumps(resp, ensure_ascii=False)
             return RawLLMOutput(text=text, raw=resp)
@@ -38,10 +38,11 @@ class OutputNormalizer:
             t = resp
             # 1) Убираем префикс Final Answer:
             t = re.sub(r'(?mi)^\s*final answer:','', t).strip()
-            # 2) Убираем любые кодовые fence-блоки ```…``` целиком
-            t = re.sub(r'```[\s\S]*?```', '', t).strip()
-            # 3) Снимаем оставшиеся одиночные fence до конца текста:
-            t = re.sub(r'```[\s\S]*$', '', t).strip()
+            # 2) Убираем любые кодовые fence-блоки ```…``` целиком (ЦЕЛИКОМ не надо!!!)
+            # удаляем все строки, которые состоят только из ``` или ```yaml
+            t = re.sub(r'^[ \t]*```(?:yaml)?[ \t]*\n?', '', t, flags=re.MULTILINE)
+            # 3) и аналогично удаляем закрывающие fence
+            t = re.sub(r'\n?[ \t]*```[ \t]*$', '', t, flags=re.MULTILINE)
             # 4) Убираем одиночные или двойные кавычки вокруг
             t = t.strip("'\"").strip()
             # 5) Если после всех этих шагов ничего не осталось – считаем пустым
@@ -68,7 +69,7 @@ class OutputNormalizer:
         llm_output_raw = OutputNormalizer.normalize_recursive(resp)
         # 2) Декодируем экранированные последовательности сразу:
         try:
-            text = maybe_unicode_unescape(text)
+            text = maybe_unicode_unescape(llm_output_raw.text)
         except Exception:
             return llm_output_raw
         # 3) Продолжаем уже существующие шаги очистки:

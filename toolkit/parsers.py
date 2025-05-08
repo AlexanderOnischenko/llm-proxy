@@ -37,6 +37,11 @@ class JsonParser(BaseParser[Dict[str, Any]]):
             return json.loads(raw.text)
         except json.JSONDecodeError as e:
             raise ValueError(f"Invalid JSON: {e}")
+        
+class IndentDumper(yaml.Dumper):
+    # запрещаем indentless-режим
+    def increase_indent(self, flow=False, indentless=False):
+        return super().increase_indent(flow, indentless=False)
     
 class YamlBlockParser(BaseParser[str], ABC):
     fence = "```"
@@ -103,13 +108,15 @@ class YamlBlockParser(BaseParser[str], ABC):
         clean_doc = extract_yaml_new(snippet.strip())
         
         doc = self.postprocess(clean_doc)
-        return yaml.dump(
+        text = yaml.dump(
             doc,
+            Dumper=IndentDumper,      
             sort_keys=False,
             allow_unicode=True,
             default_flow_style=False,
-            indent=2,
+            indent=2,                 # глубина содержимого
         )
+        return text
 
 class ComponentsParser(YamlBlockParser):
     def __init__(self):
