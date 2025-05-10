@@ -247,7 +247,8 @@ class MultiDocParser:
                         break
                     else:
                         parsed = extract_yaml_new(clean)
-                        result[key] = parsed[key]
+                        for root_key, root_val in parsed.items():
+                            result[root_key] = root_val
                         break
         return result
 
