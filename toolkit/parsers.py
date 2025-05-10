@@ -312,9 +312,6 @@ class DfdParser(BaseParser[Dict[str, str]]):
     """Парсит два блока DFD: diagram_file.mmd и traceability.md из Markdown-ответа."""
     def parse(self, raw: RawLLMOutput) -> Dict[str, str]:
         text = raw.text
-        # Проверка на наличие секции Final Answer
-        if not re.search(r"Final Answer", text, flags=re.DOTALL):
-            raise ValueError("Нет блока Final Answer")
         # Определяем блоки
         blocks = ["diagram_file.mmd", "traceability.md"]
         positions: Dict[str, int] = {}
