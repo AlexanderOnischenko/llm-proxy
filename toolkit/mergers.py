@@ -5,7 +5,6 @@ from pydantic import ValidationError
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Union, Set
 from utils.deep_merge_dicts import deep_merge_dicts
-from utils.merge_add_suffix import merge_add_suffix_recursive
 from sentence_transformers import SentenceTransformer, util
 from functools import lru_cache
 from tests.crash_logger import crash_logger
@@ -24,68 +23,68 @@ class BaseMerger(ABC):
         ...
 
 
-# class ComponentMerger(BaseMerger):
-#     """
-#     Алгоритм “старое + новое → merged” взят из OldComponentsParser.merge
-#     Но тут мы работаем уже с Python-структурами, а не со строками.
-#     """
-#     @crash_logger("components_merge")
-#     def merge(self, old: Dict[str, Any], new: Dict[str, Any]) -> Dict[str, Any]:
-#         old_comps: List[Dict[str, Any]] = old.get("components", [])
-#         new_comps: List[Dict[str, Any]] = new.get("components", [])
+class ComponentMerger(BaseMerger):
+    """
+    Алгоритм “старое + новое → merged” взят из OldComponentsParser.merge
+    Но тут мы работаем уже с Python-структурами, а не со строками.
+    """
+    @crash_logger("components_merge")
+    def merge(self, old: Dict[str, Any], new: Dict[str, Any]) -> Dict[str, Any]:
+        old_comps: List[Dict[str, Any]] = old.get("components", [])
+        new_comps: List[Dict[str, Any]] = new.get("components", [])
 
-#         # вспомогательные мапы
-#         by_name = {c["name"]: c for c in old_comps if "name" in c}
-#         used_new_ids = set()
-#         merged: List[Dict[str, Any]] = []
+        # вспомогательные мапы
+        by_name = {c["name"]: c for c in old_comps if "name" in c}
+        used_new_ids = set()
+        merged: List[Dict[str, Any]] = []
 
-#         for old_c in old_comps:
-#             name = old_c.get("name")
-#             match = None
+        for old_c in old_comps:
+            name = old_c.get("name")
+            match = None
 
-#             # 1) точное совпадение
-#             if name in by_name and any(n.get("name") == name for n in new_comps):
-#                 match = next(n for n in new_comps if n.get("name") == name)
-#                 used_new_ids.add(id(match))
+            # 1) точное совпадение
+            if name in by_name and any(n.get("name") == name for n in new_comps):
+                match = next(n for n in new_comps if n.get("name") == name)
+                used_new_ids.add(id(match))
 
-#             # 2) семантическое совпадение (ваша логика)
-#             if not match:
-#                 resp = old_c.get("semantic", {}).get("responsibility")
-#                 if resp:
-#                     # ... ваш код с Levenshtein, threshold, best candidate ...
-#                     from Levenshtein import ratio
-#                     candidates = [
-#                         n for n in new_comps
-#                         if n.get("semantic", {}).get("responsibility") == resp
-#                     ]
-#                     best, best_ratio = None, 0.0
-#                     for c in candidates:
-#                         r = ratio(name or "", c.get("name",""))
-#                         if r > best_ratio:
-#                             best, best_ratio = c, r
-#                     if best_ratio >= 0.8:
-#                         match = best
-#                         used_new_ids.add(id(best))
+            # 2) семантическое совпадение (ваша логика)
+            if not match:
+                resp = old_c.get("semantic", {}).get("responsibility")
+                if resp:
+                    # ... ваш код с Levenshtein, threshold, best candidate ...
+                    from Levenshtein import ratio
+                    candidates = [
+                        n for n in new_comps
+                        if n.get("semantic", {}).get("responsibility") == resp
+                    ]
+                    best, best_ratio = None, 0.0
+                    for c in candidates:
+                        r = ratio(name or "", c.get("name",""))
+                        if r > best_ratio:
+                            best, best_ratio = c, r
+                    if best_ratio >= 0.8:
+                        match = best
+                        used_new_ids.add(id(best))
 
-#             # 3) объединяем
-#             if match:
-#                 merged.append(deep_merge_dicts(old_c, match))
-#             else:
-#                 merged.append(old_c)
+            # 3) объединяем
+            if match:
+                merged.append(deep_merge_dicts(old_c, match))
+            else:
+                merged.append(old_c)
 
-#         # 4) добавляем все новые, что не попали
-#         for nc in new_comps:
-#             if id(nc) not in used_new_ids:
-#                 merged.append(nc)
+        # 4) добавляем все новые, что не попали
+        for nc in new_comps:
+            if id(nc) not in used_new_ids:
+                merged.append(nc)
 
-#         # 5) финальный документ
-#         out = old.copy()
-#         # перезаписываем прочие поля из new, кроме components
-#         for k, v in new.items():
-#             if k != "components":
-#                 out[k] = v
-#         out["components"] = merged
-#         return out
+        # 5) финальный документ
+        out = old.copy()
+        # перезаписываем прочие поля из new, кроме components
+        for k, v in new.items():
+            if k != "components":
+                out[k] = v
+        out["components"] = merged
+        return out
 
 
 #1) Функция для ленивой загрузки модели — кешируется, так что будет вызвана ровно один раз
@@ -109,7 +108,7 @@ class SemanticYamlMerger(BaseMerger):
         root: str = "components",
         key_path: str = "semantic.responsibility",
         model_name: str = "all-MiniLM-L6-v2",
-        emb_threshold: float = 0.75,
+        emb_threshold: float = 0.92,
     ):
         self.root = root
         self.key_path = key_path
