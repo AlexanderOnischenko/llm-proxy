@@ -184,6 +184,31 @@ class MultiDocParser:
             line for line in doc.splitlines()
             if not self.fence_re.match(line)
         ).strip()
+    
+    def _extract_open_api(self, text: str) -> Dict[str, Any]:
+        """
+        Выделяет разделы root-уровня спецификации OpenAPI (openapi, info, servers,
+        paths, components, security, securitySchemes и т.д.),
+        парсит каждый через extract_yaml_new и собирает обратно в YAML.
+        """
+        ROOT_KEYS = ['openapi', 'info', 'servers', 'paths', 'components',
+                    'security', 'securitySchemes', 'tags', 'externalDocs']
+        # формируем шаблон для поиска разделов
+        section_pattern = re.compile(
+            r'(?ms)^(?P<key>' + '|'.join(ROOT_KEYS) + r'):\s*.*?' +
+            r'(?=^(?:' + '|'.join(ROOT_KEYS) + r'):\s|\Z)',
+            re.MULTILINE
+        )
+        total: Dict[str, Any] = {}
+        for match in section_pattern.finditer(text):
+            raw_section = match.group(0)
+            # парсим раздел в структуру
+            doc = extract_yaml_new(raw_section)
+            key = match.group('key')
+            # извлекаем поддокумент и снова дампим в YAML
+            total[key]=doc.get(key, doc)
+
+        return total
 
     @crash_logger("api_parser")
     def parse(self, raw: RawLLMOutput) -> Dict[str, Any]:
@@ -202,6 +227,7 @@ class MultiDocParser:
             clean = self.clean_doc(part)
             for key in keys:
                 if key in part:
+                    # порядок выполнения if-ов важен, поскольку openapi может встречаться в несокльких местах
                     if 'pythonSpec' in part:
                         # Извлекаем весь текст после метки "pythonSpec:" (включая отступы)
                         # Предполагаем формат "pythonSpec: |\n<код>"
@@ -213,6 +239,11 @@ class MultiDocParser:
                             # Если нет литерала, возвращаем всё после двоеточия
                             parts_line = clean.split(':', 1)
                             result[key] = parts_line[1].strip() if len(parts_line) > 1 else '' 
+                        break
+                    elif 'openapi' in part:
+                        parsed = self._extract_open_api(clean)
+                        for root_key, root_val in parsed.items():
+                            result[root_key] = root_val
                         break
                     else:
                         parsed = extract_yaml_new(clean)
