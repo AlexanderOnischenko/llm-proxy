@@ -276,6 +276,7 @@ class CachedQueuedChatOpenAI(ChatOpenAI):
         sender: Optional[str] = None,
     ) -> ChatResult:
         method = "invoke"
+        key_args: tuple[Any, ...]
         if messages is not None:
             msgs = self._normalize_messages(messages)
             key_args = (tuple(m.dict() for m in msgs),)

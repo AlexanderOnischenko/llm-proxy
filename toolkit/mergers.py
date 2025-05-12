@@ -166,7 +166,7 @@ class SemanticYamlMerger(BaseMerger):
         new_texts = [deep_get(n, self.key_path) or "" for n in new_list]
         old_emb = self._model.encode(old_texts, convert_to_tensor=True, normalize_embeddings=True)
         new_emb = self._model.encode(new_texts, convert_to_tensor=True, normalize_embeddings=True)
-        cos_scores = util.cos_sim(new_emb, old_emb)
+        cos_scores = self._util.cos_sim(new_emb, old_emb)
 
         used_old = set()
         merged = []
@@ -345,7 +345,7 @@ class SemanticComponentMerger(SemanticYamlMerger):
             )
             A = embs[: len(allowed)]
             E = embs[len(allowed) : ]
-            sims = util.cos_sim(A, E)  # shape (len(allowed), len(extras))
+            sims = self._util.cos_sim(A, E)  # shape (len(allowed), len(extras))
 
             for j, extra in enumerate(extras):
                 row = sims[:, j]
