@@ -7,6 +7,7 @@ from utils.logger import logger
 from abc import ABC, abstractmethod
 from typing import TypeVar, Generic, List, Dict, Any, Protocol, Union
 from tests.crash_logger import crash_logger
+from dataclasses import dataclass
 
 from llm.toolkit.output_normalizer import RawLLMOutput
 from utils.extract_yaml import extract_yaml_new, dump_yaml
@@ -37,6 +38,15 @@ class JsonParser(BaseParser[Dict[str, Any]]):
             return json.loads(raw.text)
         except json.JSONDecodeError as e:
             raise ValueError(f"Invalid JSON: {e}")
+        
+# llm/toolkit/parsers.py
+
+class OutputParserException(Exception):
+    """
+    Ошибка разбора выхода LLM: выбрасывается, если парсер наткнулся на некорректный формат.
+    """
+    def __init__(self, message: str):
+        super().__init__(message)
     
     
 class YamlBlockParser(BaseParser[str], ABC):
@@ -502,7 +512,7 @@ class ContextMappingParser(YamlBlockParser):
         try:
             data = yaml.safe_load(yaml_str) or {}
         except yaml.YAMLError as e:
-            raise Exception(f"Invalid YAML: {e}")
+            raise OutputParserException(f"Invalid YAML: {e}")
 
         contexts = data.get("contexts", [])
         changes: List[ContextChange] = []
@@ -526,3 +536,49 @@ class ContextMappingParser(YamlBlockParser):
 
         # Return empty list if no valid changes
         return changes
+    
+@dataclass
+class DiffOperation:
+    operation: str        # 'add', 'modify', or 'conflict'
+    target_path: str      # e.g. 'EntityName.fieldName' or 'EntityName'
+    current_value: Any    # value before change
+    new_value: Any        # value after change
+
+class DiffParser(YamlBlockParser):
+    """
+    Parses LLM output in strict YAML format under the key 'diff'.
+    Extracts a list of DiffOperation objects.
+    Inherits from YamlBlockParser for YAML block extraction.
+    """
+    def __init__(self):
+        super().__init__(key="diff")
+
+    @crash_logger("diff_parser")
+    def parse(self, text: str) -> List[DiffOperation]:
+        # Extract the YAML block for 'diff'
+        yaml_str = super().parse(text)
+        try:
+            data = yaml.safe_load(yaml_str) or {}
+        except yaml.YAMLError as e:
+            raise OutputParserException(f"Invalid YAML: {e}")
+
+        raw_ops = data.get("diff") or []
+        operations: List[DiffOperation] = []
+        for entry in raw_ops:
+            op = entry.get("operation")
+            path = entry.get("target_path")
+            curr = entry.get("current_value")
+            new = entry.get("new_value")
+            # Validate minimal fields
+            if not op or not path:
+                continue
+            operations.append(
+                DiffOperation(
+                    operation=op,
+                    target_path=path,
+                    current_value=curr,
+                    new_value=new
+                )
+            )
+        return operations
+
