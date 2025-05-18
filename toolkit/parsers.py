@@ -60,6 +60,9 @@ class YamlBlockParser(BaseParser[str], ABC):
                 if k.lower() == self.key:
                     data[self.key] = data.pop(k)
                     break
+        
+        if not data.get(self.key):
+            return None
 
         if not isinstance(data.get(self.key), (list,dict)):
             raise ValueError(f"В разобранном YAML нет списка '{self.key}'")
@@ -480,3 +483,46 @@ class TechStackParser(DelimitedParser):
                 r"(?m)^#\s*(?!Technology Stack)"
             ]
         )
+
+
+from domain.models.cml import ContextChange
+
+
+class ContextMappingParser(YamlBlockParser):
+    def __init__(self):
+        super().__init__(key="contexts") 
+    """
+    Parser for LLM output in strict YAML format mapping features to context changes.
+    Inherits from YamlBlockParser to extract the YAML block.
+    """
+    @crash_logger("bounded_context_parser")
+    def parse(self, text: str) -> List[ContextChange]:
+        # Extract the YAML block
+        yaml_str = super().parse(text)
+        try:
+            data = yaml.safe_load(yaml_str) or {}
+        except yaml.YAMLError as e:
+            raise Exception(f"Invalid YAML: {e}")
+
+        contexts = data.get("contexts", [])
+        changes: List[ContextChange] = []
+        for ctx in contexts:
+            name = ctx.get("name")
+            operation = ctx.get("operation")
+            # Skip invalid or empty entries
+            if not name or operation not in ("modify", "new"):
+                continue
+
+            change = ContextChange(
+                name=name,
+                operation=operation,
+                usecases=ctx.get("usecases", []),
+                aggregates=ctx.get("aggregates", []),
+                annotations=ctx.get("annotations", {}),
+                upstream=ctx.get("upstream", []),
+                downstream=ctx.get("downstream", []),
+            )
+            changes.append(change)
+
+        # Return empty list if no valid changes
+        return changes
