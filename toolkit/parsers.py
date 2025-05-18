@@ -102,7 +102,7 @@ class YamlBlockParser(BaseParser[str], ABC):
         escaped = re.escape(self.key)
         m = re.search(rf"(?im)(?<!\S){escaped}\s*:", text)
         if not m:
-            raise ValueError(f"Не найден ни JSON-массив '{self.key}', ни YAML-ключ '{self.key}:'")
+            return ""
         snippet = text[m.start():]
 
         # 3) обрезаем по первому `---`
@@ -506,9 +506,9 @@ class ContextMappingParser(YamlBlockParser):
     Inherits from YamlBlockParser to extract the YAML block.
     """
     @crash_logger("bounded_context_parser")
-    def parse(self, text: str) -> List[ContextChange]:
+    def parse(self, raw: RawLLMOutput) -> List[ContextChange]:
         # Extract the YAML block
-        yaml_str = super().parse(text)
+        yaml_str = super().parse(raw)
         try:
             data = yaml.safe_load(yaml_str) or {}
         except yaml.YAMLError as e:
@@ -554,9 +554,9 @@ class DiffParser(YamlBlockParser):
         super().__init__(key="diff")
 
     @crash_logger("diff_parser")
-    def parse(self, text: str) -> List[DiffOperation]:
+    def parse(self, raw: RawLLMOutput) -> List[DiffOperation]:
         # Extract the YAML block for 'diff'
-        yaml_str = super().parse(text)
+        yaml_str = super().parse(raw)
         try:
             data = yaml.safe_load(yaml_str) or {}
         except yaml.YAMLError as e:
