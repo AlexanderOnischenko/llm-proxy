@@ -25,11 +25,17 @@ class BaseParser(Protocol[T_co]):
         """Разбирает нормализованный вывод LLM в доменную модель T."""
         ...
 
-
 class TextParser(BaseParser[str]):
     """Парсер, возвращающий "как есть" текст ответа."""
     def parse(self, raw: RawLLMOutput) -> str:
         return raw.text
+    
+class OutputParserException(Exception):
+    """
+    Ошибка разбора выхода LLM: выбрасывается, если парсер наткнулся на некорректный формат.
+    """
+    def __init__(self, message: str):
+        super().__init__(message)
 
 class JsonParser(BaseParser[Dict[str, Any]]):
     """Парсит JSON-ответ LLM в словарь."""
@@ -41,134 +47,7 @@ class JsonParser(BaseParser[Dict[str, Any]]):
         except json.JSONDecodeError as e:
             raise ValueError(f"Invalid JSON output: {e}")
         
-# llm/toolkit/parsers.py
 
-class OutputParserException(Exception):
-    """
-    Ошибка разбора выхода LLM: выбрасывается, если парсер наткнулся на некорректный формат.
-    """
-    def __init__(self, message: str):
-        super().__init__(message)
-    
-    
-class YamlBlockParser(BaseParser[str], ABC):
-    fence = "```"
-    doc_sep_pattern = re.compile(r"(?m)^---\s*$")
-    section_pattern = re.compile(r"(?m)^##\s+")
-
-    def __init__(self, key: str):
-        self.key = key
-    
-    def preprocess(self, raw: RawLLMOutput) -> str:
-        if isinstance(raw, str):
-            return raw
-        else:
-            return raw.text.strip()
-    
-    def postprocess(self, data: Any ) -> Any:
-        # normalize casing
-        if self.key not in data:
-            for k in list(data):
-                if k.lower() == self.key:
-                    data[self.key] = data.pop(k)
-                    break
-        
-        if not data.get(self.key):
-            return None
-
-        if not isinstance(data.get(self.key), (list,dict)):
-            raise ValueError(f"В разобранном YAML нет списка '{self.key}'")
-        return data  # no dump here!
-    
-
-    def parse(self, raw: RawLLMOutput) -> str:
-        text = self.preprocess(raw)
-        if not text.strip():
-            return ""
-        
-        # 1) Попытка JSON/Python-литерала
-        jblock = extract_bracketed_json(text)
-        if jblock:
-            data = None
-            try:
-                data = json.loads(jblock)
-            except Exception:
-                try:
-                    data = ast.literal_eval(jblock)
-                except Exception:
-                    pass
-            if isinstance(data, dict) and isinstance(data.get(self.key), (list, dict)):
-                return dump_yaml({self.key: data[self.key]})
-
-        # 2) Ищем YAML-фрагмент
-        escaped = re.escape(self.key)
-        m = re.search(rf"(?im)(?<!\S){escaped}\s*:", text)
-        if not m:
-            return ""
-        snippet = text[m.start():]
-
-        # 3) обрезаем по первому `---`
-        snippet = self.doc_sep_pattern.split(snippet)[0]
-        # 4) обрезаем по первому заголовку `## …`
-        snippet = self.section_pattern.split(snippet)[0]
-        # 5) убираем любой оставшийся fence
-        snippet = snippet.split(self.fence)[0]
-
-        # 6) Чистим и форматируем через extract_yaml
-        clean_doc = extract_yaml_new(snippet.strip())
-        
-        doc = self.postprocess(clean_doc)
-
-        return dump_yaml(doc)
-
-class ComponentsParser(YamlBlockParser):
-    def __init__(self):
-        super().__init__(key="components") 
-    
-    def preprocess(self, raw: RawLLMOutput) -> str:
-        text = super().preprocess(raw)
-        # если явный маркер «ничего не надо обновлять» — вернём пустую строку
-        if "NO_COMPONENTS_TO_UPDATE" in text:
-            return ""
-        # в остальных случаях — просто обрежем пробелы
-        return text.strip()
-    
-    @crash_logger("components_parser")
-    def parse(self, raw: RawLLMOutput) -> str:
-        return super().parse(raw)
-
-
-class IntegrationParser(YamlBlockParser):
-    def __init__(self):
-        super().__init__(key="integration_view")
-    
-    @crash_logger("integrations_parser")
-    def parse(self, raw: RawLLMOutput) -> str:
-        return super().parse(raw)
-
-class DataModelParser(YamlBlockParser):
-    def __init__(self):
-        super().__init__(key="entities")
-    
-    @crash_logger("data_model_parser")
-    def parse(self, raw: RawLLMOutput) -> str:
-        return super().parse(raw)
-
-class UseCaseParser(YamlBlockParser):
-    def __init__(self):
-        super().__init__(key="use_cases")
-    
-    @crash_logger("use_case_parser")
-    def parse(self, raw: RawLLMOutput) -> str:
-        return super().parse(raw) 
-
-class LayeredFlowsParser(YamlBlockParser):
-    def __init__(self):
-        super().__init__(key="logical_view_result")
-    
-    @crash_logger("layered_flow_parser")
-    def parse(self, raw: RawLLMOutput) -> str:
-        return super().parse(raw) 
 
 
 class MultiDocParser:
@@ -491,124 +370,7 @@ class TechStackParser(DelimitedParser):
         )
 
 
-from domain.models.cml import ContextChange
 
 
-class ContextMappingParser(YamlBlockParser):
-    def __init__(self):
-        super().__init__(key="contexts") 
-    """
-    Parser for LLM output in strict YAML format mapping features to context changes.
-    Inherits from YamlBlockParser to extract the YAML block.
-    """
-    @crash_logger("bounded_context_parser")
-    def parse(self, raw: RawLLMOutput) -> List[ContextChange]:
-        # Extract the YAML block
-        yaml_str = super().parse(raw)
-        try:
-            data = yaml.safe_load(yaml_str) or {}
-        except yaml.YAMLError as e:
-            raise OutputParserException(f"Invalid YAML: {e}")
 
-        contexts = data.get("contexts", [])
-        changes: List[ContextChange] = []
-        for ctx in contexts:
-            name = ctx.get("name")
-            operation = ctx.get("operation")
-            # Skip invalid or empty entries
-            if not name or operation not in ("modify", "new"):
-                continue
-
-            change = ContextChange(
-                name=name,
-                operation=operation,
-                usecases=ctx.get("usecases", []),
-                aggregates=ctx.get("aggregates", []),
-                annotations=ctx.get("annotations", {}),
-                upstream=ctx.get("upstream", []),
-                downstream=ctx.get("downstream", []),
-            )
-            changes.append(change)
-
-        # Return empty list if no valid changes
-        return changes
     
-@dataclass
-class DiffOperation:
-    operation: str        # 'add', 'modify', or 'conflict'
-    target_path: str      # e.g. 'EntityName.fieldName' or 'EntityName'
-    current_value: Any    # value before change
-    new_value: Any        # value after change
-
-class DiffParser(YamlBlockParser):
-    """
-    Parses LLM output in strict YAML format under the key 'diff'.
-    Extracts a list of DiffOperation objects.
-    Inherits from YamlBlockParser for YAML block extraction.
-    """
-    def __init__(self):
-        super().__init__(key="diff")
-
-    @crash_logger("diff_parser")
-    def parse(self, raw: RawLLMOutput) -> List[DiffOperation]:
-        # Extract the YAML block for 'diff'
-        yaml_str = super().parse(raw)
-        try:
-            data = yaml.safe_load(yaml_str) or {}
-        except yaml.YAMLError as e:
-            raise OutputParserException(f"Invalid YAML: {e}")
-
-        raw_ops = data.get("diff") or []
-        operations: List[DiffOperation] = []
-        for entry in raw_ops:
-            op = entry.get("operation")
-            path = entry.get("target_path")
-            curr = entry.get("current_value")
-            new = entry.get("new_value")
-            # Validate minimal fields
-            if not op or not path:
-                continue
-            operations.append(
-                DiffOperation(
-                    operation=op,
-                    target_path=path,
-                    current_value=curr,
-                    new_value=new
-                )
-            )
-        return operations
-    
-
-class DataModelDiffParser(DiffParser):
-    """
-    Extends DiffParser to validate DiffOperation.new_value correctness
-    and raise human-readable errors on invalid entries.
-    """
-    @crash_logger("data_model_diff_parser")
-    def parse(self, raw: str) -> List[DiffOperation]:
-        # Parse base diff list
-        ops = super().parse(raw)
-
-        for op in ops:
-            target = op.target_path
-            if op.operation == 'add':
-                nv = op.new_value
-                if not isinstance(nv, dict):
-                    raise OutputParserException(
-                        f"Invalid new_value for 'add' on '{target}': expected object, got {type(nv).__name__}"
-                    )
-                # Ensure required keys for a new entity
-                required = ['description', 'fields', 'relations']
-                missing = [k for k in required if k not in nv]
-                if missing:
-                    raise OutputParserException(
-                        f"Missing keys {missing} in new_value for 'add' on '{target}'"
-                    )
-            elif op.operation == 'modify':
-                if op.new_value is None:
-                    raise OutputParserException(
-                        f"Missing new_value for 'modify' on '{target}'"
-                    )
-            # conflict operations are informational
-        return ops
-
