@@ -29,20 +29,37 @@ class RawLLMOutput:
             raw=None  # сюда можно добавить десериализацию, если нужно
         )
 
+_FINAL_ACTION_RE = re.compile(
+    r'''
+    (?is)                           # флаги: insensitive, dotall
+    ["']?Final\s+Answer["']?\s*(?::\s*)?(?P<input>.*)$''',
+    re.VERBOSE
+)
+
+_ACTION_INPUT_RE = re.compile(
+    r'''(?is)["']?action_input["']?\s*(?::\s*)?(?P<input>.*)$''',
+    re.VERBOSE
+)
+
+_THINK_RE = re.compile(r'<think>.*?(?:</think>|$)', re.DOTALL | re.IGNORECASE)
+
 def extract_final_answer(text: str) -> str:
     """
     Ищет (независимо от регистра) сначала 'Final Answer:', затем 'Action Input:'.
     Если находит, возвращает всё, что идёт после первого совпадения (до конца строки/текста).
     Если ни одного маркера нет, возвращает исходный текст без изменений.
     """
+    # Убираем think секцию, если есть
+    text = _THINK_RE.sub('', text)
     # Паттерн для Final Answer:
-    fa = re.search(r'(?is)Final\s+Answer\s*:\s*(.*)', text, flags=re.DOTALL)
+    fa = _FINAL_ACTION_RE.search(text)
     if fa:
-        ai = re.search(r'(?is)Action\s+Input\s*:\s*(.*)', fa.group(1).strip(), flags=re.DOTALL)
+        ai = _ACTION_INPUT_RE.search(fa.group('input').strip())
         if ai:
-            return ai.group(1).strip()
+            return ai.group('input').strip()
         else:
-            return fa.group(1).strip()
+            return fa.group('input').strip()
+    text = OutputNormalizer._unwrap_reasoning_content(text)
     # Если ничего не нашли — возвращаем всё как есть
     return text
 
@@ -113,3 +130,22 @@ class OutputNormalizer:
             finish_reason=llm_output_raw.finish_reason,
             raw = llm_output_raw.raw,
             )
+    
+    @staticmethod
+    def _unwrap_reasoning_content(text: str) -> str:
+        """
+        Если вход — это JSON-объект с полем 'reasoning_content',
+        извлекаем его и снимаем экранирование '\\n' → реальный перенос.
+        Иначе возвращаем исходный текст.
+        """
+        try:
+            obj = json.loads(text)
+        except (ValueError, json.JSONDecodeError):
+            return text
+
+        if isinstance(obj, dict) and 'reasoning_content' in obj:
+            inner = obj['reasoning_content']
+            # если inner снова строка с экранир. \n — превращаем в реальные переводы
+            if isinstance(inner, str):
+                return inner.replace(r'\\n', '\n')
+        return text

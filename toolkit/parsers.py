@@ -2,7 +2,7 @@ import re
 import json
 import ast
 import yaml
-from utils.extract_json import extract_json, extract_bracketed_json
+from utils.extract_json import extract_json, extract_bracketed_json, extract_json_new
 from utils.logger import logger
 from abc import ABC, abstractmethod
 from typing import TypeVar, Generic, List, Dict, Any, Protocol, Union
@@ -32,12 +32,14 @@ class TextParser(BaseParser[str]):
         return raw.text
 
 class JsonParser(BaseParser[Dict[str, Any]]):
-    """Парсер JSON-ответов LLM."""
+    """Парсит JSON-ответ LLM в словарь."""
     def parse(self, raw: RawLLMOutput) -> Dict[str, Any]:
+        text = raw.text.strip()
         try:
-            return json.loads(raw.text)
+            text = extract_json_new(text)
+            return json.loads(text)
         except json.JSONDecodeError as e:
-            raise ValueError(f"Invalid JSON: {e}")
+            raise ValueError(f"Invalid JSON output: {e}")
         
 # llm/toolkit/parsers.py
 
@@ -321,29 +323,23 @@ class SystemContextParser(DelimitedParser):
         )
 
 
-class DfdParser(BaseParser[Dict[str, str]]):
-    """Парсит два блока DFD: diagram_file.mmd и traceability.md из Markdown-ответа."""
+class DfdParser(JsonParser):
+    """Парсит JSON и возвращает словарь с полями diagram_file и traceability_file."""
+    @crash_logger("dfd_parser")
     def parse(self, raw: RawLLMOutput) -> Dict[str, str]:
-        text = raw.text
-        # Определяем блоки
-        blocks = ["diagram_file.mmd", "traceability.md"]
-        positions: Dict[str, int] = {}
-        for block in blocks:
-            pattern = rf"(?m)^###\s*{re.escape(block)}"
-            match = re.search(pattern, text)
-            if not match:
-                raise ValueError(f"Missing block: ### {block}")
-            positions[block] = match.start()
-        # Сортируем блоки по позиции
-        sorted_blocks = sorted(positions.items(), key=lambda x: x[1])
-        first_block, first_pos = sorted_blocks[0]
-        second_block, second_pos = sorted_blocks[1]
-        snippet1 = text[first_pos:second_pos].strip()
-        snippet2 = text[second_pos:].strip()
-        return {
-            first_block: snippet1,
-            second_block: snippet2,
-        }
+        data = super().parse(raw)
+        required_keys = ["diagram_file", "traceability_file"]
+        result: Dict[str, str] = {}
+        for key in required_keys:
+            value = data.get(key)
+            if isinstance(value, list) and all(isinstance(item, str) for item in value):
+                # Объединяем список строк в одну многострочную строку
+                result[key] = "\n".join(value)
+            elif isinstance(value, str):
+                result[key] = value
+            else:
+                raise ValueError(f"Missing or invalid key in JSON output: {key}")
+        return result
     
 class FSMarkdownParser(BaseParser[Dict[str, str]]):
     """Парсит Markdown с блоками stories.md, coverage_matrix.md и gap_analysis.yaml."""
@@ -581,4 +577,38 @@ class DiffParser(YamlBlockParser):
                 )
             )
         return operations
+    
+
+class DataModelDiffParser(DiffParser):
+    """
+    Extends DiffParser to validate DiffOperation.new_value correctness
+    and raise human-readable errors on invalid entries.
+    """
+    @crash_logger("data_model_diff_parser")
+    def parse(self, raw: str) -> List[DiffOperation]:
+        # Parse base diff list
+        ops = super().parse(raw)
+
+        for op in ops:
+            target = op.target_path
+            if op.operation == 'add':
+                nv = op.new_value
+                if not isinstance(nv, dict):
+                    raise OutputParserException(
+                        f"Invalid new_value for 'add' on '{target}': expected object, got {type(nv).__name__}"
+                    )
+                # Ensure required keys for a new entity
+                required = ['description', 'fields', 'relations']
+                missing = [k for k in required if k not in nv]
+                if missing:
+                    raise OutputParserException(
+                        f"Missing keys {missing} in new_value for 'add' on '{target}'"
+                    )
+            elif op.operation == 'modify':
+                if op.new_value is None:
+                    raise OutputParserException(
+                        f"Missing new_value for 'modify' on '{target}'"
+                    )
+            # conflict operations are informational
+        return ops
 
