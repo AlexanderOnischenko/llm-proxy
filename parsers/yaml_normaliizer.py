@@ -51,6 +51,42 @@ def split_yaml_lines(text: str) -> List[str]:
     lines.append(''.join(current))
     return lines
 
+def is_mapping_line(line: str) -> bool:
+    """
+    Проверяет, является ли строка YAML-маппингом (key: value), а не сигнатурой функции.
+    """
+    in_single = in_double = in_parens = False
+    for i, c in enumerate(line):
+        if c == "'" and not in_double:
+            in_single = not in_single
+        elif c == '"' and not in_single:
+            in_double = not in_double
+        elif c == '(' and not in_single and not in_double:
+            in_parens = True
+        elif c == ')' and not in_single and not in_double:
+            in_parens = False
+        elif c == ':' and not in_single and not in_double and not in_parens:
+            # Есть неэкранированный двоеточие вне кавычек и скобок
+            # Убедимся, что перед ним есть ключ
+            key = line[:i].strip()
+            if key:  # Можно добавить доп.проверки: не начинается с `-`, `*`, `?`
+                return True
+    return False
+
+def scalar_looks_like_special_yaml(val: str) -> bool:
+    val = val.strip()
+    if not val:
+        return False
+    if val[0] in {'*', '&', '!', '>', '|', '@'}:
+        return True
+    if re.match(r'^[\[\]\{\},:\?\-]+$', val):  # только спец. символы
+        return True
+    if re.match(r'^![\w\-]*$', val):  # yaml tag
+        return True
+    if re.match(r'^[>|][-+]?$', val):  # folded or literal
+        return True
+    return False
+
 # === Quoting logic ===
 
 def scalar_needs_quotes(s: str) -> bool:
@@ -201,13 +237,13 @@ def prequote_line(line: str) -> str:
     if lm:
         prefix, val, comment = lm.group('prefix'), lm.group('val').strip(), lm.group('comment') or ''
         # если это на самом деле вложенный mapping (foo: bar) — пропускаем
-        if re.match(r'^[^"\']+?:', val):
+        if is_mapping_line(val):
             return line
         if (not val or _NUMBER_RE.match(val) or _BOOL_RE.match(val)
             or _EMPTY_LIST_RE.match(val) or _ARRAY_RE.match(val)
             or (val[0] in ('"', "'") and val[-1] == val[0])):
             return line
-        if scalar_needs_quotes(val):
+        if scalar_needs_quotes(val) | scalar_looks_like_special_yaml(val):
             return f"{prefix}{quote_scalar(val)}{comment}"
         return line
     return line

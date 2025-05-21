@@ -5,8 +5,11 @@ import ast
 import json
 from typing import Any
 from abc import ABC
+
+import yaml
 from llm.toolkit.parsers import BaseParser, OutputParserException
 from llm.toolkit.output_normalizer import RawLLMOutput
+from llm.parsers.yaml_normaliizer import YamlNormalizer
 from tests.crash_logger import crash_logger
 
 from utils.extract_yaml import extract_yaml_new, dump_yaml
@@ -77,7 +80,8 @@ class YamlBlockParser(BaseParser[str], ABC):
         snippet = snippet.split(self.fence)[0]
 
         # 6) Чистим и форматируем через extract_yaml
-        clean_doc = extract_yaml_new(snippet.strip())
+        normalized = YamlNormalizer().normalize(snippet.strip())
+        clean_doc = yaml.safe_load(normalized)
         
         doc = self.postprocess(clean_doc)
 
