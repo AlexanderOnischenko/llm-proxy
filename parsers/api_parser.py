@@ -1,7 +1,10 @@
 import re
 from typing import List, Dict, Any
 
+import yaml
+
 from llm.toolkit.output_normalizer import RawLLMOutput
+from llm.parsers.yaml_parser import YamlBlockParser
 from llm.parsers.openapi_parser import OpenApiParser
 
 from utils.extract_yaml import extract_yaml_new
@@ -74,12 +77,13 @@ class MultiDocParser:
         o_parser = OpenApiParser()
         parts = self.split_docs(raw.text)
         keys = ['metadata', 'openapi', 'pythonSpec', 'notes']
+        processed_keys = set()
         result: Dict[str, Any] = {}
-
         for part in parts:
             clean = self.clean_doc(part)
             for key in keys:
-                if key in part:
+                if (key in part) and not (key in processed_keys):
+                    processed_keys.add(key)
                     # порядок выполнения if-ов важен, поскольку openapi может встречаться в несокльких местах
                     if 'pythonSpec' in part:
                         # Извлекаем весь текст после метки "pythonSpec:" (включая отступы)
@@ -99,8 +103,10 @@ class MultiDocParser:
                             result[root_key] = root_val
                         break
                     else:
-                        parsed = extract_yaml_new(clean)
-                        for root_key, root_val in parsed.items():
+                        parser = YamlBlockParser(key)
+                        parsed = parser.parse(RawLLMOutput(text=clean))
+                        parsed_dict = yaml.safe_load(parsed)
+                        for root_key, root_val in parsed_dict.items():
                             result[root_key] = root_val
                         break
         return result

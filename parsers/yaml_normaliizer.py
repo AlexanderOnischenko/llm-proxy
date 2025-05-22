@@ -10,9 +10,13 @@ _LINE_VALUE_RE = re.compile(
         r'(?P<comment>\s*#.*)?$'  # комментарий вне кавычек
     )
 _LIST_VALUE_RE = re.compile(
-    r'^(?P<prefix>\s*-\s*)'
-        r'(?P<val>"(.+?))'  # значение
-        r'(?P<comment>\s*#.*)?$'  # комментарий вне кавычек
+    r'^(?P<prefix>\s*-\s*)'                                    # отступ + "- "
+    r'(?P<val>'                                                 # захватываем значение, которое может быть:
+      r'"(?:[^"\\]|\\.)*"|'                                    #   — двойная-кавычная строка
+      r'\'(?:[^\'\\]|\\.)*\'|'                                 #   — одинарная-кавычная строка
+      r'[^#\n]+'                                               #   — или любая последовательность не-# и не-"\n"
+    r')'
+    r'(?P<comment>\s*#.*)?$'                                    # комментарий (нежадно)
 )
 _NEEDS_QUOTE_RE = re.compile(r"[\s:\[\]\{\},'" + r"\\]|^(?:true|false|null|[-+]?\d+(?:\.\d*)?(?:[eE][-+]?\d+)?)$",
                               re.IGNORECASE)
@@ -219,6 +223,28 @@ def quote_arrays(line: str) -> str:
         return '[' + ', '.join(new) + ']'
     return re.sub(r'\[([^\]]*)\]', repl, line)
 
+def prequote_mapping(mapping: str) -> str:
+    """
+    Оборачивает ключ в mapping (key: value), если он требует кавычек.
+    Например: **some text**: val  →  "**some text**": val
+    """
+    # Парсим ключ и значение
+    m = re.match(r'^(?P<key>[^:]+):\s*(?P<val>.*)$', mapping)
+    if not m:
+        return mapping  # если не соответствует — возвращаем как есть
+
+    key = m.group('key').strip()
+    val = m.group('val').strip()
+
+    # Если ключ уже в кавычках — оставляем
+    if key and key[0] in ('"', "'") and key[-1] == key[0]:
+        return mapping
+
+    # Ключ требует кавычек?
+    if scalar_needs_quotes(key) or scalar_looks_like_special_yaml(key):
+        return f'{quote_scalar(key)}: {val}'
+
+    return mapping
 
 def prequote_line(line: str) -> str:
     # mapping key:value
@@ -238,7 +264,7 @@ def prequote_line(line: str) -> str:
         prefix, val, comment = lm.group('prefix'), lm.group('val').strip(), lm.group('comment') or ''
         # если это на самом деле вложенный mapping (foo: bar) — пропускаем
         if is_mapping_line(val):
-            return line
+            return f"{prefix}{prequote_mapping(val)}{comment}"
         if (not val or _NUMBER_RE.match(val) or _BOOL_RE.match(val)
             or _EMPTY_LIST_RE.match(val) or _ARRAY_RE.match(val)
             or (val[0] in ('"', "'") and val[-1] == val[0])):
