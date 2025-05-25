@@ -14,6 +14,14 @@ from utils.deep_get import deep_get
 import torch
 import inspect
 
+class Conflict(BaseModel):
+    path: str
+    message: str
+
+class MergeResult(BaseModel):
+    status: str
+    mergedSpec: Dict[str, Any]
+    conflicts: List[Conflict]
 
 # Сохраняем оригинальный метод
 _orig_tensor_argmax = torch.Tensor.argmax
