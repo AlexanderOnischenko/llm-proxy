@@ -69,12 +69,10 @@ class OutputNormalizer:
     def normalize_recursive(resp: str | ChatResult | LLMResult) -> RawLLMOutput:
         # Поддержка списка: нормализуем каждый элемент и соединяем через ",\n"
         if isinstance(resp, list):
-            texts: List[str] = []
-            for item in resp:
-                item_text = OutputNormalizer.normalize(item).text
-                texts.append(item_text)
-            joined = ",\n".join(texts)
-            return RawLLMOutput(text=joined, raw=resp)
+            texts = [OutputNormalizer.normalize(item).text for item in resp]
+            # оборачиваем в JSON-массив
+            array_text = "[\n  " + ",\n  ".join(texts) + "\n]"
+            return RawLLMOutput(text=array_text, raw=resp)
         if isinstance(resp, dict):
             # Если в словаре есть поле text или output, возьмём его, иначе — просто сериализуем весь dict
             if "text" in resp:
@@ -95,6 +93,9 @@ class OutputNormalizer:
             #t = re.sub(r'\n?[ \t]*```[ \t]*$', '', t, flags=re.MULTILINE)
             # 4) Убираем одиночные или двойные кавычки вокруг
             t = t.strip("'\"").strip()
+            # если текст похож на несколько объектов без скобок — обернём
+            if re.match(r'^\s*{', t) and re.search(r'}\s*,\s*{', t):
+                t = "[\n  " + t.replace("},", "},\n  ") + "\n]"
             # 5) Если после всех этих шагов ничего не осталось – считаем пустым
             if not t:
                 return RawLLMOutput(text="")
