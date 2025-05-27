@@ -9,7 +9,7 @@ from llm.parsers.openapi_parser import OpenApiParser
 
 from utils.extract_yaml import extract_yaml_new
 
-from tests.crash_logger import crash_logger
+from utils.crash_logger import crash_logger
 
 class MultiDocParser:
     """

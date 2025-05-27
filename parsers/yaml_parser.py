@@ -10,7 +10,7 @@ import yaml
 from llm.toolkit.parsers import BaseParser, OutputParserException
 from llm.toolkit.output_normalizer import RawLLMOutput
 from llm.parsers.yaml_normaliizer import YamlNormalizer
-from tests.crash_logger import crash_logger
+from utils.crash_logger import crash_logger
 
 from utils.extract_yaml import extract_yaml_new, dump_yaml
 from utils.extract_json import extract_bracketed_json

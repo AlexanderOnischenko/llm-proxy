@@ -6,7 +6,7 @@ from utils.extract_json import extract_json, extract_bracketed_json, extract_jso
 from utils.logger import logger
 from abc import ABC, abstractmethod
 from typing import TypeVar, Generic, List, Dict, Any, Protocol, Union
-from tests.crash_logger import crash_logger
+from utils.crash_logger import crash_logger
 from dataclasses import dataclass
 
 from llm.toolkit.output_normalizer import RawLLMOutput

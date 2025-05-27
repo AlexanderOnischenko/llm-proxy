@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional, Union, Set, Type, ClassVar, get_or
 from utils.deep_merge_dicts import deep_merge_dicts
 from sentence_transformers import SentenceTransformer, util
 from functools import lru_cache
-from tests.crash_logger import crash_logger
+from utils.crash_logger import crash_logger
 from domain.models.components import Component, ComponentsStructure, Structural, Semantic, PublicInterface
 from utils.logger import logger
 from utils.deep_get import deep_get

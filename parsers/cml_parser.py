@@ -8,7 +8,7 @@ from llm.toolkit.output_normalizer import RawLLMOutput
 from llm.toolkit.parsers import OutputParserException
 from llm.parsers.yaml_parser import YamlBlockParser
 
-from tests.crash_logger import crash_logger
+from utils.crash_logger import crash_logger
 
 class ContextMappingParser(YamlBlockParser):
     def __init__(self):

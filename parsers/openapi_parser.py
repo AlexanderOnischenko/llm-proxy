@@ -5,7 +5,7 @@ from llm.parsers.yaml_normaliizer import YamlNormalizer, default_line_processor,
 from llm.parsers.yaml_parser import YamlBlockParser
 from utils.extract_yaml import extract_yaml_no_beautify
 
-from tests.crash_logger import crash_logger
+from utils.crash_logger import crash_logger
 
 class OpenApiNormalizer(YamlNormalizer):
     def __init__(self):
