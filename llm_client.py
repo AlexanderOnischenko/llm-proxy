@@ -2,24 +2,20 @@ import httpx
 import asyncio
 from typing import List, Optional, Any, Union
 from pydantic import PrivateAttr
-from langchain_core.language_models.base import BaseLanguageModel
 from utils.logger import logger
 from functools import wraps
+from langchain_core.language_models.base import BaseLanguageModel
 from langchain_core.prompts.chat import ChatPromptValue
 from langchain_core.messages.base import BaseMessage
 from langchain_core.messages.human import HumanMessage
 from langchain.schema import LLMResult, ChatResult
 import langchain_core.outputs.chat_result
-
-
-
-# Системные константы из ENV
-ENDPOINT = "http://localhost:8001/llm"
-TIMEOUT  = 300.0
+import os
+from config.settings import settings
 
 class RemoteLLM(BaseLanguageModel):
-    endpoint: str = ENDPOINT
-    timeout: float = TIMEOUT
+    endpoint: str = settings.llm_endpoint
+    timeout: float = settings.llm_timeout
     _client: httpx.Client = PrivateAttr()
 
     def __init__(self, **data):
@@ -59,6 +55,7 @@ class RemoteLLM(BaseLanguageModel):
             "sender": sender,
         }
         resp = self._client.post(self.endpoint, json=payload)
+        logger.debug("LLM.generate() response status=%s body=%s", resp.status_code, resp.text)
         resp.raise_for_status()
         raw = resp.json()    
         # 1) Парсим в LLMResult

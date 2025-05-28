@@ -13,9 +13,9 @@ from llm.toolkit.output_normalizer import RawLLMOutput
 from utils.extract_yaml import extract_yaml_new, dump_yaml
 from pydantic import ValidationError
 from domain.models.adr import ADRInfo
-from processors.adr_processor.models.schemas import ConflictResult, RelevantADRList, RelevantADR
-from processors.adr_processor.models.schemas import MatchedADR
-from processors.adr_processor.models.schemas import QuestionAnswer, QuestionAnswers
+from schemas_pkg.adr.schemas import ConflictResult, RelevantADRList, RelevantADR
+from schemas_pkg.adr.schemas import MatchedADR
+from schemas_pkg.adr.schemas import QuestionAnswer, QuestionAnswers
 
 T_co = TypeVar('T_co', covariant=True)
 

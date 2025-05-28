@@ -2,7 +2,6 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from langchain.schema import HumanMessage as SchemaHuman, SystemMessage as SchemaSystem, AIMessage as SchemaAI, BaseMessage as SchemaBase
 from langchain.schema import ChatResult
-from llm.llm_wrapper import get_llm  # синглтон-фабрика внутри этого процесса
 from utils.logger import logger
 from typing import Any, Dict, List
 import inspect
@@ -10,6 +9,9 @@ from fastapi.responses import JSONResponse
 from fastapi.encoders import jsonable_encoder
 from langchain.schema import LLMResult
 import re
+
+# импорты из этого же пакета
+from llm_wrapper import get_llm_internal
 
 def extract_messages(nested_list):
     flat_list = []
@@ -22,7 +24,11 @@ def extract_messages(nested_list):
     return nested_list
 
 app = FastAPI()
-llm = get_llm()
+llm = get_llm_internal()
+
+@app.get("/health")
+async def health():
+    return {"status": "llm_ok"}
 
 class LLMRequest(BaseModel):
     method: str
