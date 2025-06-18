@@ -1,3 +1,4 @@
+# llm/llm_wrapper.py
 import time
 import threading
 import sqlite3
@@ -6,27 +7,33 @@ import hashlib
 import pickle
 import asyncio
 import inspect
+from pydantic import ConfigDict
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import List, Optional, AsyncIterator, Iterator, Any, Dict, Union
+from contextlib import contextmanager
 
 from langchain_core.callbacks.stdout import StdOutCallbackHandler
 from langchain_community.chat_models import ChatOpenAI
 from langchain.schema import HumanMessage, SystemMessage, AIMessage, BaseMessage
 from langchain.schema import LLMResult, ChatResult, PromptValue
-from utils.logger import logger
+from shared_pkg.utils.logging_config import get_logger
+#from llm.deps import get_settings       # <— путь подставьте свой
+#from shared_pkg.config.settings import Settings
+
+logger = get_logger(__name__)
 
 # ===========================
 # Вспомогательные функции и настройка логирования
 # ===========================
 
-def flatten_list(nested_list):
-    flat_list = []
-    for item in nested_list:
-        if isinstance(item, (list, tuple)):
-            flat_list.extend(flatten_list(item))
-        else:
-            flat_list.append(item)
-    return flat_list
+# def flatten_list(nested_list):
+#     flat_list = []
+#     for item in nested_list:
+#         if isinstance(item, (list, tuple)):
+#             flat_list.extend(flatten_list(item))
+#         else:
+#             flat_list.append(item)
+#     return flat_list
 
 # Переопределяем on_chat_model_start в StdOutCallbackHandler
 def _no_op_on_chat_model_start(self, serialized: dict, messages: list[Any], **kwargs):
@@ -34,36 +41,24 @@ def _no_op_on_chat_model_start(self, serialized: dict, messages: list[Any], **kw
     return None
 StdOutCallbackHandler.on_chat_model_start = _no_op_on_chat_model_start
 
-# ===========================
-# Конфигурация
-# ===========================
-MAX_CONCURRENT = 1
-CACHE_ENABLED = True
-CACHE_PATH    = "llm_cache.sqlite"
-CACHE_TTL     = 600000
-
-
 
 # ===========================
 # Менеджер потоков через ThreadPoolExecutor
 # ===========================
 class _QueueManager:
-    def __init__(self, real_llm: ChatOpenAI):
+    def __init__(self, real_llm: ChatOpenAI, max_workers: int):
         self._llm = real_llm
-        self._executor = ThreadPoolExecutor(max_workers=MAX_CONCURRENT)
+        self._executor = ThreadPoolExecutor(max_workers=max_workers)
 
     def submit(self, method: str, *args, **kwargs) -> Future:
-        # Фильтруем kwargs по сигнатуре
-        fn = getattr(self._llm, method)
+        # Берём оригинальный метод у базового класса, избегаем рекурсии
+        fn = getattr(ChatOpenAI, method).__get__(self._llm, ChatOpenAI)
+        # теперь fn ― это ChatOpenAI.generate/predict/... c self == обёртка
         sig = inspect.signature(fn)
         safe_kwargs = {k: v for k, v in kwargs.items() if k in sig.parameters}
 
-        # Специальная логика для generate
         call_fn = fn
         call_args = args
-        if method == "generate":
-            call_args = ([flatten_list(args)],)
-            call_fn = self._llm.generate
 
         logger.debug(f"Submitting {method} with args={call_args} kwargs={safe_kwargs}")
         return self._executor.submit(call_fn, *call_args, **safe_kwargs)
@@ -80,28 +75,50 @@ class _QueueManager:
 # Класс LLM с кэшированием и очередью
 # ===========================
 class CachedQueuedChatOpenAI(ChatOpenAI):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        real = ChatOpenAI(**kwargs)
-        self._qm = _QueueManager(real)
+    
+    # разрешаем extra-поля, чтобы pydantic-валидация не падала
+    model_config = ConfigDict(extra="ignore")
 
-        if CACHE_ENABLED:
+    def __init__(self, **kwargs):
+        # Отделяем наши параметры от chatllm_kwargs
+        cache_enabled  = kwargs.pop("cache_enabled")
+        cache_path     = kwargs.pop("cache_path")
+        cache_ttl      = kwargs.pop("cache_ttl")
+        max_concurrent = kwargs.pop("max_concurrent")
+        # Всё остальное — аргументы для ChatOpenAI
+        super().__init__(**kwargs)
+
+        # 3 Устанавливаем поля напрямую, чтобы не падало в __setattr__
+        object.__setattr__(self, "cache_enabled",  cache_enabled)
+        object.__setattr__(self, "cache_path",     cache_path)
+        object.__setattr__(self, "cache_ttl",      cache_ttl)
+
+        # ThreadPool
+        self._qm = _QueueManager(self, max_workers=max_concurrent)
+
+        # инициализируем sqlite только если включён кеш
+        if self.cache_enabled:
             self._cache_lock = threading.Lock()
-            self._conn = sqlite3.connect(CACHE_PATH, check_same_thread=False)
+            self._conn = sqlite3.connect(self.cache_path, check_same_thread=False)
             cur = self._conn.cursor()
             cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS cache(
-                  key   TEXT PRIMARY KEY,
-                  value BLOB,
-                  ts    INTEGER
-                )
-                """
+                "CREATE TABLE IF NOT EXISTS cache(key TEXT PRIMARY KEY, value BLOB, ts INTEGER)"
             )
-            if CACHE_TTL > 0:
-                cutoff = int(time.time()) - CACHE_TTL
+            if self.cache_ttl > 0:
+                cutoff = int(time.time()) - self.cache_ttl
                 cur.execute("DELETE FROM cache WHERE ts < ?", (cutoff,))
             self._conn.commit()
+
+    # -------------- utility для временного отключения кеша --------------
+
+    @contextmanager
+    def no_cache(self):
+        prev = self.cache_enabled
+        object.__setattr__(self, "cache_enabled", False)
+        try:
+            yield
+        finally:
+            object.__setattr__(self, "cache_enabled", prev)
 
     def _make_key(self, method: str, args: tuple, kwargs: dict) -> str:
         blob = json.dumps({"method": method, "args": args, "kwargs": kwargs},
@@ -114,7 +131,7 @@ class CachedQueuedChatOpenAI(ChatOpenAI):
         if not row:
             return None
         val, ts = row
-        if CACHE_TTL > 0 and time.time() - ts > CACHE_TTL:
+        if self.cache_ttl > 0 and time.time() - ts > self.cache_ttl:
             with self._cache_lock:
                 self._conn.execute("DELETE FROM cache WHERE key=?", (key,))
                 self._conn.commit()
@@ -154,42 +171,42 @@ class CachedQueuedChatOpenAI(ChatOpenAI):
     def predict(self, prompt: str, stop: Optional[str] = None, sender: Optional[str] = None) -> str:
         method = "predict"
         key = self._make_key(method, (prompt,), {"stop": stop, "sender": sender})
-        if CACHE_ENABLED:
+        if self.cache_enabled:
             cached = self._get_cached(key)
             if cached is not None:
                 logger.info("[CACHE HIT] predict")
                 return cached
         future = self._qm.submit(method, prompt, stop=stop, sender=sender)
         out = future.result()
-        if CACHE_ENABLED:
+        if self.cache_enabled:
             self._set_cached(key, out)
         return out
 
     def complete(self, prompt: str, stop: Optional[str] = None, sender: Optional[str] = None) -> LLMResult:
         method = "complete"
         key = self._make_key(method, (prompt,), {"stop": stop, "sender": sender})
-        if CACHE_ENABLED:
+        if self.cache_enabled:
             cached = self._get_cached(key)
             if cached is not None:
                 logger.info("[CACHE HIT] complete")
                 return cached
         future = self._qm.submit(method, prompt, stop=stop, sender=sender)
         out = future.result()
-        if CACHE_ENABLED:
+        if self.cache_enabled:
             self._set_cached(key, out)
         return out
 
     def batch(self, prompts: List[str], stop: Optional[str] = None, sender: Optional[str] = None) -> LLMResult:
         method = "batch"
         key = self._make_key(method, (tuple(prompts),), {"stop": stop, "sender": sender})
-        if CACHE_ENABLED:
+        if self.cache_enabled:
             cached = self._get_cached(key)
             if cached is not None:
                 logger.info("[CACHE HIT] batch")
                 return cached
         future = self._qm.submit(method, prompts, stop=stop, sender=sender)
         out = future.result()
-        if CACHE_ENABLED:
+        if self.cache_enabled:
             self._set_cached(key, out)
         return out
 
@@ -211,7 +228,7 @@ class CachedQueuedChatOpenAI(ChatOpenAI):
             (tuple(m.dict() for m in msgs[0]),),
             {"stop": stop, "sender": sender}
         )
-        if CACHE_ENABLED:
+        if self.cache_enabled:
             cached = self._get_cached(key)
             if cached is not None:
                 logger.info("[CACHE HIT] generate")
@@ -227,7 +244,7 @@ class CachedQueuedChatOpenAI(ChatOpenAI):
             sender=sender,
         )
         out = future.result()
-        if CACHE_ENABLED:
+        if self.cache_enabled:
             self._set_cached(key, out)
         return out
 
@@ -245,7 +262,7 @@ class CachedQueuedChatOpenAI(ChatOpenAI):
             (tuple(m.dict() for m in msgs),),
             {"stop": stop, "sender": sender}
         )
-        if CACHE_ENABLED:
+        if self.cache_enabled:
             cached = self._get_cached(key)
             if cached is not None:
                 logger.info("[CACHE HIT] stream")
@@ -284,7 +301,7 @@ class CachedQueuedChatOpenAI(ChatOpenAI):
             key_args = (input,)
         key = self._make_key(method, key_args, {"stop": stop, "sender": sender})
 
-        if CACHE_ENABLED:
+        if self.cache_enabled:
             cached = self._get_cached(key)
             if cached is not None:
                 logger.info("[CACHE HIT] invoke")
@@ -302,9 +319,47 @@ class CachedQueuedChatOpenAI(ChatOpenAI):
             sender=sender,
         )
         out = future.result()
-        if CACHE_ENABLED:
+        if self.cache_enabled:
             self._set_cached(key, out)
         return out
+    
+    def invoke_or_generate(
+        self,
+        method: str,
+        args: Optional[List[Any]] = None,
+        kwargs: Optional[Dict[str, Any]] = None,
+        sender: Optional[str] = None,
+    ) -> Union[str, LLMResult, ChatResult]:
+        """
+        Если method == 'invoke' и в kwargs есть 'messages' — вызывает generate,
+        иначе пробрасывает на invoke или на любой другой метод.
+        """
+        args = args or []
+        kwargs = kwargs or {}
+
+        # remap invoke → generate при наличии сообщений
+        if method == "invoke" and "messages" in kwargs:
+            method_name = "generate"
+        else:
+            method_name = method
+
+        if not hasattr(self, method_name):
+            raise ValueError(f"Unknown LLM method: {method_name}")
+
+        fn = getattr(self, method_name)
+        sig = inspect.signature(fn)
+
+        # оставляем только ожидаемые fn параметры
+        call_kwargs = {
+            k: v for k, v in kwargs.items()
+            if k in sig.parameters
+        }
+
+        # если есть sender — пробрасываем, если fn принимает
+        if sender and "sender" in sig.parameters:
+            call_kwargs["sender"] = sender
+
+        return fn(*args, **call_kwargs)
 
     # Асинхронные алиасы
     async def apredict(self, prompt: str, stop: Optional[str] = None, sender: Optional[str] = None) -> str:
@@ -372,25 +427,3 @@ class CachedQueuedChatOpenAI(ChatOpenAI):
             run_manager=run_manager,
             sender=sender,
         )
-
-
-def create_custom_llm(**kwargs) -> CachedQueuedChatOpenAI:
-    return CachedQueuedChatOpenAI(**{
-        # ChatOpenAI параметры
-        "base_url":        "https://api.llm7.io/v1",
-        "model_name":      "deepseek-r1",
-        "temperature":     "0.0",
-        "openai_api_base": "https://api.llm7.io/v1",
-        "openai_api_key":  "unused",
-        "verbose":         True,
-        "max_tokens":      "50000",
-        **kwargs
-    })
-
-_llm_instance = None
-
-def get_llm_internal() -> CachedQueuedChatOpenAI:
-    global _llm_instance
-    if _llm_instance is None:
-        _llm_instance = create_custom_llm()
-    return _llm_instance

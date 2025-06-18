@@ -2,28 +2,52 @@
 # -------------------------------------------------------------
 FROM python:3.13-slim
 
-ARG CACHE_CONTAINER_DIR=/app/cache
+# 1) Аргументы по умолчанию
+ARG USER=appuser
+ARG GROUP=appgroup
+ARG LLM_PORT=8002
+ARG CACHE_CONTAINER_DIR=/home/${USER}/app/cache
+
+# 2) Переменные среды
+ENV PYTHONPATH=/home/${USER}/app
+ENV LOG_FILE_PATH=/home/${USER}/app/logs/errors.log
 ENV CACHE_CONTAINER_DIR=${CACHE_CONTAINER_DIR}
+ENV LLM_PORT=${LLM_PORT}
 
-WORKDIR /app
+# 3) Создаём пользователя
+RUN groupadd -r ${GROUP} \
+    && useradd -r -g ${GROUP} ${USER}
 
-# If you have a simple mock_requirements.txt, copy & install
-COPY ./llm/requirements.txt .
+# 4) Устанавливаем зависимости
+WORKDIR /tmp
+COPY ./llm/requirements.txt                 .
 RUN pip install --no-cache-dir -r requirements.txt
+
+# 5) Создаем папки и выставляем права одним слоем
+RUN mkdir -p /home/${USER}/app/logs \
+             ${CACHE_CONTAINER_DIR} \
+    && chown -R ${USER}:${GROUP} /home/${USER}
+
+# 6) Переключаемся на пользователя
+USER ${USER}
+WORKDIR /home/${USER}/app
+
+COPY --chown=${USER}:${GROUP} llm/src/.             .
+COPY --chown=${USER}:${GROUP} shared_pkg/           ./shared_pkg/
+
 
 # DEBUG
 # RUN pip install debugpy
 # RUN apt-get update && apt-get install -y net-tools
 # END DEBUG
 
-# 2) Создадим папку кеша на всякий случай (volume её затрет, но для локального RUN полезно)
-RUN mkdir -p $CACHE_CONTAINER_DIR
+
 
 # Copy mock server code
-COPY config/ ./config/
-COPY utils/ ./utils/
-COPY llm/. .
+# COPY config/                    ./config/
+# COPY src/utils/                 ./utils/
+
 
 # Expose LLM
 EXPOSE ${LLM_PORT}
-CMD uvicorn llm_server:app --host 0.0.0.0 --port ${LLM_PORT}
+CMD uvicorn llm.main:app --host 0.0.0.0 --port ${LLM_PORT}

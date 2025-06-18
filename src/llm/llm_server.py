@@ -1,4 +1,6 @@
-from fastapi import FastAPI, HTTPException
+import re
+from fastapi import FastAPI, HTTPException, Depends
+from contextlib import asynccontextmanager
 from pydantic import BaseModel
 from langchain.schema import HumanMessage as SchemaHuman, SystemMessage as SchemaSystem, AIMessage as SchemaAI, BaseMessage as SchemaBase
 from langchain.schema import ChatResult
@@ -8,10 +10,14 @@ import inspect
 from fastapi.responses import JSONResponse
 from fastapi.encoders import jsonable_encoder
 from langchain.schema import LLMResult
-import re
+from shared_pkg.utils.logging_config import get_logger
+from functools import lru_cache
+from shared_pkg.config.settings import Settings
+
+logger = get_logger(__name__)
 
 # импорты из этого же пакета
-from llm_wrapper import get_llm_internal
+from llm.src.services.wrapper import get_llm_internal
 
 def extract_messages(nested_list):
     flat_list = []
@@ -23,12 +29,45 @@ def extract_messages(nested_list):
             return flat_list
     return nested_list
 
-app = FastAPI()
+
+# Lifespan: здесь выполняем «startup» до yield, и «shutdown» после
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    settings = get_settings()
+    # Только в проде
+    if settings.is_production:
+        llm = get_llm_internal()
+        try:
+            # временно без кеша
+            with llm.no_cache():
+                reply = llm.predict("привет")
+            logger.info("LLM startup check successful: %r", reply)
+        except Exception:
+            logger.exception("LLM startup check failed, stopping app")
+            raise
+    else:
+        logger.info("Skipping LLM startup check in %r environment", settings.environment)
+
+    yield  # <-- после этого запускаются маршруты
+
+    # здесь можно закрыть соединения, если нужно
+    logger.info("Shutting down…")
+
+app = FastAPI(lifespan=lifespan)
 llm = get_llm_internal()
 
+@lru_cache()
+def get_settings() -> Settings:
+    """
+    Возвращает один и тот же экземпляр Settings,
+    подгружая .env и парся переменные через Pydantic.
+    """
+    return Settings()
+
+# Ваши маршруты, где можно инжектить settings:
 @app.get("/health")
-async def health():
-    return {"status": "llm_ok"}
+def health(settings: Settings = Depends(get_settings)):
+    return {"status": "ok", "debug": settings.debug}
 
 class LLMRequest(BaseModel):
     method: str
