@@ -2,6 +2,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.encoders import jsonable_encoder
+from openai import OpenAIError
 
 import re
 import inspect
@@ -95,6 +96,14 @@ async def call_llm(req: LLMRequest, llm: CachedQueuedChatOpenAI = Depends(get_ll
         d = result.model_dump()
         payload = jsonable_encoder(d)
         return JSONResponse(content=payload)
+    except OpenAIError as e:
+        # ❶ печатаем КОРОТКОЕ описание + traceback
+        logger.exception("OpenAI upstream failure (%s): %s", e.__class__.__name__, e)
+        # ❷ клиенту отвечаем нейтральным 502 без HTML
+        raise HTTPException(
+            status_code=502,
+            detail=f"Upstream LLM error: {e.__class__.__name__} {getattr(e, 'status_code', '')}"
+        ) from e
     except Exception as e:
         logger.exception("LLM request failed")
         raise HTTPException(status_code=502, detail=str(e))

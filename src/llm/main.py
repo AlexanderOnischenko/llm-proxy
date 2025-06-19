@@ -4,7 +4,9 @@ from contextlib import asynccontextmanager
 from shared_pkg.config.settings import Settings, get_settings
 from llm.deps import build_llm
 from llm.routers.llm import router as llm_router
+import logging
 from shared_pkg.utils.logging_config import get_logger, configure_logging
+
 
 logger = get_logger(__name__)
 
@@ -12,9 +14,13 @@ def create_app() -> FastAPI:
     # Настройка логирования
     configure_logging()
 
+    for noisy in ("httpx", "openai", "httpcore"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
     # Загрузка настроек приложения
     settings = get_settings()
 
+    # TODO разобраться как включить no-cache запрос в LLM на старте
     # @asynccontextmanager
     # async def lifespan(app: FastAPI):
     #     settings : Settings = get_settings()
