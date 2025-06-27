@@ -363,13 +363,43 @@ class CachedQueuedChatOpenAI(ChatOpenAI):
 
     # Асинхронные алиасы
     async def apredict(self, prompt: str, stop: Optional[str] = None, sender: Optional[str] = None) -> str:
-        return await self._qm.submit_async("predict", prompt, stop=stop, sender=sender)
+        method = "apredict"
+        key = self._make_key(method, (prompt,), {"stop": stop, "sender": sender})
+        if self.cache_enabled:
+            cached = self._get_cached(key)
+            if cached is not None:
+                logger.info("[CACHE HIT] apredict")
+                return cached
+        out = await self._qm.submit_async("predict", prompt, stop=stop, sender=sender)
+        if self.cache_enabled:
+            self._set_cached(key, out)
+        return out
 
     async def acomplete(self, prompt: str, stop: Optional[str] = None, sender: Optional[str] = None) -> LLMResult:
-        return await self._qm.submit_async("complete", prompt, stop=stop, sender=sender)
+        method = "acomplete"
+        key = self._make_key(method, (prompt,), {"stop": stop, "sender": sender})
+        if self.cache_enabled:
+            cached = self._get_cached(key)
+            if cached is not None:
+                logger.info("[CACHE HIT] acomplete")
+                return cached
+        out = await self._qm.submit_async("complete", prompt, stop=stop, sender=sender)
+        if self.cache_enabled:
+            self._set_cached(key, out)
+        return out
 
     async def abatch(self, prompts: List[str], stop: Optional[str] = None, sender: Optional[str] = None) -> LLMResult:
-        return await self._qm.submit_async("batch", prompts, stop=stop, sender=sender)
+        method = "abatch"
+        key = self._make_key(method, (tuple(prompts),), {"stop": stop, "sender": sender})
+        if self.cache_enabled:
+            cached = self._get_cached(key)
+            if cached is not None:
+                logger.info("[CACHE HIT] abatch")
+                return cached
+        out = await self._qm.submit_async("batch", prompts, stop=stop, sender=sender)
+        if self.cache_enabled:
+            self._set_cached(key, out)
+        return out
 
     async def agenerate(
         self,
@@ -381,9 +411,22 @@ class CachedQueuedChatOpenAI(ChatOpenAI):
         run_manager: Any = None,
         sender: Optional[str] = None,
     ) -> ChatResult:
-        return await self._qm.submit_async(
+        method = "agenerate"
+        msgs = self._normalize_messages(messages)
+        msgs = [msgs]
+        key = self._make_key(
+            method,
+            (tuple(m.dict() for m in msgs[0]),),
+            {"stop": stop, "sender": sender}
+        )
+        if self.cache_enabled:
+            cached = self._get_cached(key)
+            if cached is not None:
+                logger.info("[CACHE HIT] agenerate")
+                return cached
+        out = await self._qm.submit_async(
             "generate",
-            messages,
+            msgs,
             stop=stop,
             callbacks=callbacks,
             tags=tags,
@@ -391,17 +434,9 @@ class CachedQueuedChatOpenAI(ChatOpenAI):
             run_manager=run_manager,
             sender=sender
         )
-
-    async def astream(
-        self,
-        messages: List[Union[BaseMessage, dict]],
-        stop: Optional[List[str]] = None,
-        callbacks: Optional[List[Any]] = None,
-        sender: Optional[str] = None,
-    ) -> AsyncIterator[ChatResult]:
-        gen = await self._qm.submit_async("stream", messages, stop=stop, callbacks=callbacks, sender=sender)
-        for chunk in gen:
-            yield chunk
+        if self.cache_enabled:
+            self._set_cached(key, out)
+        return out
 
     async def ainvoke(
         self,
@@ -416,7 +451,22 @@ class CachedQueuedChatOpenAI(ChatOpenAI):
         run_manager: Any = None,
         sender: Optional[str] = None,
     ) -> ChatResult:
-        return await self._qm.submit_async(
+        method = "ainvoke"
+        key_args: tuple[Any, ...]
+        if messages is not None:
+            msgs = self._normalize_messages(messages)
+            key_args = (tuple(m.dict() for m in msgs),)
+        else:
+            key_args = (input,)
+        key = self._make_key(method, key_args, {"stop": stop, "sender": sender})
+
+        if self.cache_enabled:
+            cached = self._get_cached(key)
+            if cached is not None:
+                logger.info("[CACHE HIT] ainvoke")
+                return cached
+
+        out = await self._qm.submit_async(
             "invoke",
             input,
             messages,
@@ -427,3 +477,6 @@ class CachedQueuedChatOpenAI(ChatOpenAI):
             run_manager=run_manager,
             sender=sender,
         )
+        if self.cache_enabled:
+            self._set_cached(key, out)
+        return out

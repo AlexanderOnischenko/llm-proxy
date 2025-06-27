@@ -80,6 +80,8 @@ async def call_llm(req: LLMRequest, llm: CachedQueuedChatOpenAI = Depends(get_ll
         method_name = "generate"
         #req.args.append('method_name="invoke"')
         logger.info(" ↳ remapping invoke → generate because messages were provided")
+    
+    method_name = "a"+method_name
 
     if not hasattr(llm, method_name):
         raise HTTPException(400, f"Unknown LLM method: {method_name}")
@@ -91,7 +93,7 @@ async def call_llm(req: LLMRequest, llm: CachedQueuedChatOpenAI = Depends(get_ll
 
     try:
         # THIS RETURNS A ChatResult object
-        result: LLMResult = fn(*req.args, **call_kwargs)
+        result: LLMResult = await fn(*req.args, **call_kwargs)
         # FastAPI will .dict() it for you under the hood
         d = result.model_dump()
         payload = jsonable_encoder(d)
