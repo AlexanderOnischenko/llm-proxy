@@ -5,3 +5,4 @@ langchain-core
 langchain_openai
 langchain_community
 pydantic_settings
+openai==1.92.2

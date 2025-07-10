@@ -422,8 +422,11 @@ class CachedQueuedChatOpenAI(ChatOpenAI):
         if self.cache_enabled:
             cached = self._get_cached(key)
             if cached is not None:
-                logger.info("[CACHE HIT] agenerate")
+                logger.info(f"[CACHE HIT] agenerate, key = {key}")
                 return cached
+            else:
+                logger.info(f"[CACHE MISS] agenerate, key = {key}")
+
         out = await self._qm.submit_async(
             "generate",
             msgs,
