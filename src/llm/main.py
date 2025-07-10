@@ -14,9 +14,6 @@ def create_app() -> FastAPI:
     # Настройка логирования
     configure_logging()
 
-    for noisy in ("httpx", "openai", "httpcore"):
-        logging.getLogger(noisy).setLevel(logging.WARNING)
-
     # Загрузка настроек приложения
     settings = get_settings()
 
