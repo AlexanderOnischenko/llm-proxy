@@ -37,7 +37,7 @@ logger = get_logger(__name__)
 
 # Переопределяем on_chat_model_start в StdOutCallbackHandler
 def _no_op_on_chat_model_start(self, serialized: dict, messages: list[Any], **kwargs):
-    print(f"[LLM START] model={serialized.get('model_name')}  messages={len(messages)}")
+    logger.info(f"[LLM START] model={serialized.get('model_name')}  messages={len(messages)}")
     return None
 StdOutCallbackHandler.on_chat_model_start = _no_op_on_chat_model_start
 
@@ -168,15 +168,15 @@ class CachedQueuedChatOpenAI(ChatOpenAI):
                 raise ValueError(f"Unsupported message element: {m!r}")
         return norm
 
-    def predict(self, prompt: str, stop: Optional[str] = None, sender: Optional[str] = None) -> str:
+    def predict(self, text: str, stop: Optional[str] = None, sender: Optional[str] = None) -> str:
         method = "predict"
-        key = self._make_key(method, (prompt,), {"stop": stop, "sender": sender})
+        key = self._make_key(method, (text,), {"stop": stop, "sender": sender})
         if self.cache_enabled:
             cached = self._get_cached(key)
             if cached is not None:
                 logger.info("[CACHE HIT] predict")
                 return cached
-        future = self._qm.submit(method, prompt, stop=stop, sender=sender)
+        future = self._qm.submit(method, text, stop=stop, sender=sender)
         out = future.result()
         if self.cache_enabled:
             self._set_cached(key, out)
@@ -196,15 +196,15 @@ class CachedQueuedChatOpenAI(ChatOpenAI):
             self._set_cached(key, out)
         return out
 
-    def batch(self, prompts: List[str], stop: Optional[str] = None, sender: Optional[str] = None) -> LLMResult:
+    def batch(self, inputs: List[str], stop: Optional[str] = None, sender: Optional[str] = None) -> LLMResult:
         method = "batch"
-        key = self._make_key(method, (tuple(prompts),), {"stop": stop, "sender": sender})
+        key = self._make_key(method, (tuple(inputs),), {"stop": stop, "sender": sender})
         if self.cache_enabled:
             cached = self._get_cached(key)
             if cached is not None:
                 logger.info("[CACHE HIT] batch")
                 return cached
-        future = self._qm.submit(method, prompts, stop=stop, sender=sender)
+        future = self._qm.submit(method, inputs, stop=stop, sender=sender)
         out = future.result()
         if self.cache_enabled:
             self._set_cached(key, out)
