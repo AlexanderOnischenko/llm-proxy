@@ -15,10 +15,11 @@ def create_custom_llm(
     params: Dict[str, Any] = {
         # ChatOpenAI параметры
         "base_url":        str(settings.llm_api_base),
-        "model_name":      settings.llm_model_name,
+        "model_name":       settings.llm_model_name,
+        "model":            settings.llm_model_name,
         "temperature":     settings.llm_temperature,
-        "openai_api_base": str(settings.llm_api_base),
-        "openai_api_key":  settings.llm_api_key,
+        "base_url": str(settings.llm_api_base),
+        "api_key":  settings.llm_api_key,
         "verbose":         settings.llm_verbose,
         "max_tokens":      settings.llm_max_tokens,
         # кеш и очередь
