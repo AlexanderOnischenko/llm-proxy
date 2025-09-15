@@ -10,7 +10,6 @@ ARG CACHE_CONTAINER_DIR=/home/${USER}/app/cache
 
 # 2) Переменные среды
 ENV PYTHONPATH=/home/${USER}/app
-ENV LOG_FILE_PATH=/home/${USER}/app/logs/errors.log
 ENV CACHE_CONTAINER_DIR=${CACHE_CONTAINER_DIR}
 ENV LLM_PORT=${LLM_PORT}
 
