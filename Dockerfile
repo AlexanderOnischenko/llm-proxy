@@ -9,7 +9,7 @@ ARG LLM_PORT=8002
 ARG CACHE_CONTAINER_DIR=/home/${USER}/app/cache
 
 # 2) Переменные среды
-ENV PYTHONPATH=/home/${USER}/app
+ENV PYTHONPATH=/home/${USER}/app:/home/${USER}/app/shared_pkg/src
 ENV CACHE_CONTAINER_DIR=${CACHE_CONTAINER_DIR}
 ENV LLM_PORT=${LLM_PORT}
 
