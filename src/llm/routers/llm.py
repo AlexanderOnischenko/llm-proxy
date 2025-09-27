@@ -1,15 +1,26 @@
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from langchain.schema import HumanMessage as SchemaHuman, SystemMessage as SchemaSystem, AIMessage as SchemaAI, BaseMessage as SchemaBase
-from langchain.schema import ChatResult
-from llm.llm_wrapper import get_llm  # синглтон-фабрика внутри этого процесса
-from utils.logger import logger
-from typing import Any, Dict, List
-import inspect
+# app/routers/llm.py
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.encoders import jsonable_encoder
-from langchain.schema import LLMResult
+from openai import OpenAIError
+
 import re
+import inspect
+from typing import List
+from langchain.schema import HumanMessage as SchemaHuman, SystemMessage as SchemaSystem, AIMessage as SchemaAI, BaseMessage as SchemaBase
+from langchain.schema import LLMResult
+
+from llm.deps import get_settings, get_llm, CachedQueuedChatOpenAI
+from llm.models.llm import LLMRequest
+from shared_pkg.utils.logging_config import get_logger
+
+logger = get_logger(__name__)
+
+router = APIRouter()
+
+@router.get("/health")
+def health(settings=Depends(get_settings)):
+    return {"status": "ok", "env": settings.environment}
 
 def extract_messages(nested_list):
     flat_list = []
@@ -21,14 +32,6 @@ def extract_messages(nested_list):
             return flat_list
     return nested_list
 
-app = FastAPI()
-llm = get_llm()
-
-class LLMRequest(BaseModel):
-    method: str
-    args: List[Any] = []
-    kwargs: Dict[str, Any] = {}
-    sender: str = "unknown"
 
 def split_system_message(text: str) -> list[str]:
     """
@@ -39,8 +42,8 @@ def split_system_message(text: str) -> list[str]:
     parts = re.split(r'(?m)(?=^# PROMPT:)', text)
     return [p.strip() for p in parts if p.strip()]
 
-@app.post("/llm", response_class=JSONResponse)
-async def call_llm(req: LLMRequest) -> JSONResponse:
+@router.post("/llm", response_class=JSONResponse)
+async def call_llm(req: LLMRequest, llm: CachedQueuedChatOpenAI = Depends(get_llm)) -> JSONResponse:
     logger.info(f"LLM request: sender={req.sender!r} method={req.method!r} args={req.args} kwargs={list(req.kwargs)}")
 
     # 1) Фильтруем «безопасные» ключи
@@ -77,6 +80,8 @@ async def call_llm(req: LLMRequest) -> JSONResponse:
         method_name = "generate"
         #req.args.append('method_name="invoke"')
         logger.info(" ↳ remapping invoke → generate because messages were provided")
+    
+    method_name = "a"+method_name
 
     if not hasattr(llm, method_name):
         raise HTTPException(400, f"Unknown LLM method: {method_name}")
@@ -88,10 +93,19 @@ async def call_llm(req: LLMRequest) -> JSONResponse:
 
     try:
         # THIS RETURNS A ChatResult object
-        result: LLMResult = fn(*req.args, **call_kwargs)
+        result: LLMResult = await fn(*req.args, **call_kwargs)
         # FastAPI will .dict() it for you under the hood
         d = result.model_dump()
         payload = jsonable_encoder(d)
         return JSONResponse(content=payload)
+    except OpenAIError as e:
+        # ❶ печатаем КОРОТКОЕ описание + traceback
+        logger.exception("OpenAI upstream failure (%s): %s", e.__class__.__name__, e)
+        # ❷ клиенту отвечаем нейтральным 502 без HTML
+        raise HTTPException(
+            status_code=502,
+            detail=f"Upstream LLM error: {e.__class__.__name__} {getattr(e, 'status_code', '')}"
+        ) from e
     except Exception as e:
+        logger.exception("LLM request failed")
         raise HTTPException(status_code=502, detail=str(e))
