@@ -33,6 +33,7 @@ WORKDIR /home/${USER}/app
 
 COPY --chown=${USER}:${GROUP} llm/src/.             .
 COPY --chown=${USER}:${GROUP} shared_pkg/           ./shared_pkg/
+COPY --chown=${USER}:${GROUP} src/domain/           ./domain/
 
 
 # DEBUG
