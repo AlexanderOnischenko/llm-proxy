@@ -20,9 +20,11 @@ RUN groupadd -r ${GROUP} \
 # 4) Устанавливаем зависимости
 WORKDIR /tmp
 COPY ./llm/requirements.txt                 .
+RUN pip install --no-cache-dir -r requirements.txt
+
 COPY ./shared_pkg/                          /tmp/shared_pkg/
-RUN pip install --no-cache-dir -r requirements.txt \
- && pip install --no-cache-dir -e /tmp/shared_pkg
+RUN pip install --no-cache-dir -e /tmp/shared_pkg
+
 
 # 5) Создаем папки и выставляем права одним слоем
 RUN mkdir -p /home/${USER}/app/logs \
