@@ -1,5 +1,5 @@
 # app/main.py
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, status
 from contextlib import asynccontextmanager
 from shared_pkg.config.settings import Settings, get_settings
 from llm.deps import build_llm
@@ -37,7 +37,11 @@ def create_app() -> FastAPI:
 #        lifespan=lifespan,
 #        debug=settings.debug
     )
-
+    
+    @app.get("/health", tags=["health"], status_code=status.HTTP_200_OK)
+    async def health():
+        return {"status": "ok"}
+    
     # Подключаем маршруты для ADR Processor
     app.include_router(
         llm_router,
