@@ -1,10 +1,7 @@
 # app/main.py
 from fastapi import FastAPI, Request, status
-from contextlib import asynccontextmanager
-from shared_pkg.config.settings import Settings, get_settings
-from llm.deps import build_llm
+from shared_pkg.config.settings import get_settings
 from llm.routers.llm import router as llm_router
-import logging
 from shared_pkg.utils.logging_config import get_logger, configure_logging
 
 

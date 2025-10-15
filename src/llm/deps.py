@@ -1,5 +1,4 @@
 # src/deps.py
-from functools import lru_cache
 from shared_pkg.config.settings import get_settings, Settings
 from fastapi import Depends
 from llm.services.client import create_custom_llm, CachedQueuedChatOpenAI
