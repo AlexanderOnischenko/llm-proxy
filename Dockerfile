@@ -18,9 +18,11 @@ RUN groupadd -r ${GROUP} \
     && useradd -r -g ${GROUP} ${USER}
 
 # 4) Устанавливаем зависимости
+WORKDIR /tmp/build
+COPY requirements.txt ./requirements.txt
+COPY ./llm/requirements.txt                 ./llm/requirements.txt
+RUN pip install --no-cache-dir -r llm/requirements.txt
 WORKDIR /tmp
-COPY ./llm/requirements.txt                 .
-RUN pip install --no-cache-dir -r requirements.txt
 
 COPY ./shared_pkg/                          /tmp/shared_pkg/
 RUN pip install --no-cache-dir -e /tmp/shared_pkg
