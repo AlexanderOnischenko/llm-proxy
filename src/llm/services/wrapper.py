@@ -140,6 +140,17 @@ class CachedQueuedChatOpenAI(ChatOpenAI):
                 raise ValueError(f"Unsupported message element: {m!r}")
         return norm
 
+    @staticmethod
+    def _message_dump(message: BaseMessage) -> Dict[str, Any]:
+        """Return a stable dictionary representation of a message."""
+        if hasattr(message, "model_dump"):
+            return message.model_dump()
+        if hasattr(message, "dict"):
+            return message.dict()
+        if hasattr(message, "__dict__"):
+            return dict(message.__dict__)
+        raise TypeError(f"Unsupported message type for dumping: {type(message)!r}")
+
     async def _run_queued(self, key: str, coro_factory):
         """In-flight dedup + concurrency limiting wrapper for async calls."""
         existing = self._inflight.get(key)
@@ -224,7 +235,7 @@ class CachedQueuedChatOpenAI(ChatOpenAI):
         msgs = [msgs]
         key = self._make_key(
             method,
-            (tuple(m.dict() for m in msgs[0]),),
+            (tuple(self._message_dump(m) for m in msgs[0]),),
             {"stop": stop, "sender": sender},
         )
         if self.cache_enabled:
@@ -264,7 +275,7 @@ class CachedQueuedChatOpenAI(ChatOpenAI):
         key_args: tuple[Any, ...]
         if messages is not None:
             msgs = self._normalize_messages(messages)
-            key_args = (tuple(m.dict() for m in msgs),)
+            key_args = (tuple(self._message_dump(m) for m in msgs),)
         else:
             key_args = (input,)
         key = self._make_key(method, key_args, {"stop": stop, "sender": sender})
