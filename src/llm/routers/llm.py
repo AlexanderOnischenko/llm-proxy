@@ -7,8 +7,16 @@ from openai import OpenAIError
 import re
 import inspect
 from typing import List
-from langchain.schema import HumanMessage as SchemaHuman, SystemMessage as SchemaSystem, AIMessage as SchemaAI, BaseMessage as SchemaBase
-from langchain.schema import LLMResult
+
+
+from langchain_core.messages import BaseMessage as SchemaBase
+
+from langchain_core.messages import HumanMessage as SchemaHuman
+
+from langchain_core.messages import AIMessage as SchemaAI
+
+from langchain_core.messages import SystemMessage as SchemaSystem
+from langchain_core.outputs import LLMResult
 
 from llm.deps import get_settings, get_llm, CachedQueuedChatOpenAI
 from llm.models.llm import LLMRequest
@@ -80,7 +88,7 @@ async def call_llm(req: LLMRequest, llm: CachedQueuedChatOpenAI = Depends(get_ll
         method_name = "generate"
         #req.args.append('method_name="invoke"')
         logger.info(" ↳ remapping invoke → generate because messages were provided")
-    
+
     method_name = "a"+method_name
 
     if not hasattr(llm, method_name):
