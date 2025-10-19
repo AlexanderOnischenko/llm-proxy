@@ -12,15 +12,21 @@ from contextlib import contextmanager
 
 from langchain_core.callbacks.stdout import StdOutCallbackHandler
 from langchain_openai import ChatOpenAI
-from langchain.schema import (
-    HumanMessage,
-    SystemMessage,
-    AIMessage,
-    BaseMessage,
-    LLMResult,
-    ChatResult,
-    PromptValue,
-)
+
+
+from langchain_core.messages import BaseMessage
+
+from langchain_core.messages import HumanMessage
+
+from langchain_core.messages import AIMessage
+
+from langchain_core.messages import SystemMessage
+
+from langchain_core.outputs import LLMResult
+
+from langchain_core.outputs import ChatResult
+
+from langchain_core.prompt_values import PromptValue
 
 from shared_pkg.utils.logging_config import get_logger
 
