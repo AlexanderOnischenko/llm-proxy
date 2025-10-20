@@ -6,7 +6,7 @@ from openai import OpenAIError
 
 import re
 import inspect
-from typing import List
+from typing import Any, List
 
 
 from langchain_core.messages import BaseMessage as SchemaBase
@@ -29,6 +29,24 @@ router = APIRouter()
 @router.get("/health")
 def health(settings=Depends(get_settings)):
     return {"status": "ok", "env": settings.environment}
+
+def _validate_message_content(raw: Any) -> str | list[str | dict[str, Any]]:
+    if raw is None:
+        raise HTTPException(400, "Message content cannot be null")
+    if isinstance(raw, str):
+        return raw
+    if isinstance(raw, list):
+        validated: list[str | dict[str, Any]] = []
+        for idx, item in enumerate(raw):
+            if isinstance(item, str):
+                validated.append(item)
+            elif isinstance(item, dict):
+                validated.append(item)
+            else:
+                raise HTTPException(400, f"Invalid list item at index {idx}: {item!r}")
+        return validated
+    raise HTTPException(400, f"Unsupported message content type: {type(raw).__name__}")
+
 
 def extract_messages(nested_list):
     flat_list = []
@@ -66,8 +84,8 @@ async def call_llm(req: LLMRequest, llm: CachedQueuedChatOpenAI = Depends(get_ll
         norm_msgs: List[SchemaBase] = []
         for m in messages:
             if isinstance(m, dict):
-                t = m.get("type","system")
-                c = m.get("content")
+                t = m.get("type", "system")
+                c = _validate_message_content(m.get("content"))
                 if t == "system":
                     norm_msgs.append(SchemaSystem(content=c))
                 elif t in ("user", "human"):
