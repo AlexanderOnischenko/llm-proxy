@@ -10,11 +10,8 @@ from typing import Any, List
 
 
 from langchain_core.messages import BaseMessage as SchemaBase
-
 from langchain_core.messages import HumanMessage as SchemaHuman
-
 from langchain_core.messages import AIMessage as SchemaAI
-
 from langchain_core.messages import SystemMessage as SchemaSystem
 from langchain_core.outputs import LLMResult
 
@@ -46,7 +43,6 @@ def _validate_message_content(raw: Any) -> str | list[str | dict[str, Any]]:
                 raise HTTPException(400, f"Invalid list item at index {idx}: {item!r}")
         return validated
     raise HTTPException(400, f"Unsupported message content type: {type(raw).__name__}")
-
 
 def extract_messages(nested_list):
     flat_list = []
