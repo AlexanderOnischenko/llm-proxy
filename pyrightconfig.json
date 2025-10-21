@@ -1,5 +1,5 @@
 {
-  "include": ["src"],
+  "include": ["."],
   "exclude": [".venv", ".venvs", "dist", "build"],
   "pythonVersion": "3.12",
   "venvPath": "../.venvs/",
