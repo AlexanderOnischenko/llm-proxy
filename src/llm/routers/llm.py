@@ -3,6 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.encoders import jsonable_encoder
 from openai import OpenAIError
+from gigachat.exceptions import GigaChatException
 
 import re
 import inspect
@@ -14,8 +15,9 @@ from langchain_core.messages import HumanMessage as SchemaHuman
 from langchain_core.messages import AIMessage as SchemaAI
 from langchain_core.messages import SystemMessage as SchemaSystem
 from langchain_core.outputs import LLMResult
+from langchain_core.language_models.chat_models import BaseChatModel
 
-from llm.deps import get_settings, get_llm, CachedQueuedChatOpenAI
+from llm.deps import get_settings, get_llm
 from llm.models.llm import LLMRequest
 from shared_pkg.utils.logging_config import get_logger
 
@@ -65,7 +67,7 @@ def split_system_message(text: str) -> list[str]:
     return [p.strip() for p in parts if p.strip()]
 
 @router.post("/llm", response_class=JSONResponse)
-async def call_llm(req: LLMRequest, llm: CachedQueuedChatOpenAI = Depends(get_llm)) -> JSONResponse:
+async def call_llm(req: LLMRequest, llm: BaseChatModel = Depends(get_llm)) -> JSONResponse:
     logger.info(f"LLM request: sender={req.sender!r} method={req.method!r} args={req.args} kwargs={list(req.kwargs)}")
 
     # 1) Фильтруем «безопасные» ключи
@@ -120,9 +122,9 @@ async def call_llm(req: LLMRequest, llm: CachedQueuedChatOpenAI = Depends(get_ll
         d = result.model_dump()
         payload = jsonable_encoder(d)
         return JSONResponse(content=payload)
-    except OpenAIError as e:
+    except (OpenAIError, GigaChatException) as e:
         # ❶ печатаем КОРОТКОЕ описание + traceback
-        logger.exception("OpenAI upstream failure (%s): %s", e.__class__.__name__, e)
+        logger.exception("LLM upstream failure (%s): %s", e.__class__.__name__, e)
         # ❷ клиенту отвечаем нейтральным 502 без HTML
         raise HTTPException(
             status_code=502,
