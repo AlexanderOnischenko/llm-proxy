@@ -27,6 +27,43 @@ WORKDIR /tmp
 COPY ./shared_pkg/                          /tmp/shared_pkg/
 RUN pip install --no-cache-dir -e /tmp/shared_pkg
 
+# GIGACHAT specials. Корневой и выпускающий (intermediate) УЦ Минцифры
+# Debian/Ubuntu base
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+ && mkdir -p /usr/local/share/ca-certificates/russian-trusted \
+ && curl -kfsSL https://gu-st.ru/content/lending/russian_trusted_root_ca_pem.crt \
+      -o /usr/local/share/ca-certificates/russian-trusted/russian_trusted_root_ca.crt \
+ && curl -kfsSL https://gu-st.ru/content/lending/russian_trusted_sub_ca_pem.crt  \
+      -o /usr/local/share/ca-certificates/russian-trusted/russian_trusted_sub_ca.crt \
+ && update-ca-certificates -v \
+ # (опционально) собрать отдельный бандл именно для клиента LLM
+ && cat /usr/local/share/ca-certificates/russian-trusted/russian_trusted_root_ca.crt \
+        /usr/local/share/ca-certificates/russian-trusted/russian_trusted_sub_ca.crt \
+      > /etc/ssl/certs/mincifry_bundle.pem
+
+# Минцифра: кладём root+sub в системное хранилище и собираем отдельный bundle
+RUN set -eux; \
+    apt-get update && apt-get install -y --no-install-recommends ca-certificates curl; \
+    mkdir -p /usr/local/share/ca-certificates/russian-trusted; \
+    curl -kfsSL https://gu-st.ru/content/lending/russian_trusted_root_ca_pem.crt \
+      | awk '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/{print}' \
+      | tr -d "\r" \
+      > /usr/local/share/ca-certificates/russian-trusted/mincifry_root.crt; \
+    curl -kfsSL https://gu-st.ru/content/lending/russian_trusted_sub_ca_pem.crt \
+      | awk '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/{print}' \
+      | tr -d "\r" \
+      > /usr/local/share/ca-certificates/russian-trusted/mincifry_sub.crt; \
+    update-ca-certificates; \
+    cat /usr/local/share/ca-certificates/russian-trusted/mincifry_root.crt \
+        /usr/local/share/ca-certificates/russian-trusted/mincifry_sub.crt \
+      > /etc/ssl/certs/mincifry_bundle.pem; \
+    chmod 0644 /etc/ssl/certs/mincifry_bundle.pem
+
+ENV GIGACHAT_CA_BUNDLE=/etc/ssl/certs/mincifry_bundle.pem \
+    GIGACHAT_VERIFY_SSL_CERTS=true \
+    SSL_CERT_FILE=/etc/ssl/certs/mincifry_bundle.pem \
+    REQUESTS_CA_BUNDLE=/etc/ssl/certs/mincifry_bundle.pem
+
 
 # 5) Создаем папки и выставляем права одним слоем
 RUN mkdir -p /home/${USER}/app/logs \
