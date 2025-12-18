@@ -1,5 +1,5 @@
 # app/routers/llm.py
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.encoders import jsonable_encoder
 from openai import OpenAIError
@@ -7,6 +7,7 @@ from openai import OpenAIError
 import re
 import inspect
 from typing import Any, List
+from uuid import uuid4
 
 
 from langchain_core.messages import BaseMessage as SchemaBase
@@ -14,9 +15,18 @@ from langchain_core.messages import HumanMessage as SchemaHuman
 from langchain_core.messages import AIMessage as SchemaAI
 from langchain_core.messages import SystemMessage as SchemaSystem
 from langchain_core.outputs import LLMResult
+from pydantic import ValidationError
 
-from llm.deps import get_settings, get_llm, CachedQueuedChatOpenAI
+from llm.deps import (
+    CachedQueuedChatOpenAI,
+    get_chat_queue,
+    get_llm,
+    get_settings,
+)
+from llm.models.chat import ChatCompletionRequest, ChatMessage
+from llm.services.priority_queue import PriorityChatQueue, ProviderError, QueueOverflowError, QueueResult
 from llm.models.llm import LLMRequest
+from llm.routers.chat import _humanize_validation_error
 from shared_pkg.utils.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -64,8 +74,79 @@ def split_system_message(text: str) -> list[str]:
     parts = re.split(r'(?m)(?=^# PROMPT:)', text)
     return [p.strip() for p in parts if p.strip()]
 
+def _generate_request_id() -> str:
+    return f"r_{uuid4().hex}"
+
+
+def _error_response(status_code: int, code: str, message: str, request_id: str) -> JSONResponse:
+    content = {
+        "error": {
+            "code": code,
+            "http_status": status_code,
+            "message": message,
+            "request_id": request_id,
+        }
+    }
+    return JSONResponse(status_code=status_code, content=content)
+
+
+def _metrics_headers(result: QueueResult, request_id: str) -> dict[str, str]:
+    return {
+        "x-llm-proxy-request-id": request_id,
+        "x-llm-proxy-queue-wait-ms": str(result.metrics.queue_wait_ms),
+        "x-llm-proxy-provider-latency-ms": str(result.metrics.provider_latency_ms),
+        "x-llm-proxy-priority": result.metrics.priority,
+    }
+
+
+def _parse_priority(raw_priority: str | None, queue: PriorityChatQueue) -> str:
+    if raw_priority is None:
+        return queue.default_priority
+    lowered = raw_priority.lower()
+    if lowered not in queue.priorities:
+        raise HTTPException(400, f"Invalid priority header: {raw_priority!r}")
+    return lowered
+
+
+def _schema_to_chat_message(message: SchemaBase) -> ChatMessage:
+    if isinstance(message, SchemaSystem):
+        role = "system"
+    elif isinstance(message, SchemaHuman):
+        role = "user"
+    elif isinstance(message, SchemaAI):
+        role = "assistant"
+    else:
+        raise HTTPException(400, f"Unsupported message type: {type(message).__name__}")
+    return ChatMessage(role=role, content=_validate_message_content(message.content))
+
+
+def _build_chat_request(
+    messages: list[SchemaBase],
+    model: str | None,
+    temperature: float | None,
+    top_p: float | None,
+    max_tokens: int | None,
+    stop: Any,
+) -> ChatCompletionRequest:
+    chat_messages = [_schema_to_chat_message(m) for m in messages]
+    return ChatCompletionRequest(
+        model=model,
+        messages=chat_messages,
+        temperature=temperature,
+        top_p=top_p,
+        max_tokens=max_tokens,
+        stop=stop,
+    )
+
+
 @router.post("/llm", response_class=JSONResponse)
-async def call_llm(req: LLMRequest, llm: CachedQueuedChatOpenAI = Depends(get_llm)) -> JSONResponse:
+async def call_llm(
+    req: LLMRequest,
+    request: Request,
+    priority: str | None = Header(default=None, alias="X-Priority"),
+    llm: CachedQueuedChatOpenAI = Depends(get_llm),
+    queue: PriorityChatQueue = Depends(get_chat_queue),
+) -> JSONResponse:
     logger.info(f"LLM request: sender={req.sender!r} method={req.method!r} args={req.args} kwargs={list(req.kwargs)}")
 
     # 1) Фильтруем «безопасные» ключи
@@ -107,6 +188,38 @@ async def call_llm(req: LLMRequest, llm: CachedQueuedChatOpenAI = Depends(get_ll
 
     if not hasattr(llm, method_name):
         raise HTTPException(400, f"Unknown LLM method: {method_name}")
+
+    if "messages" in safe:
+        request_id = _generate_request_id()
+        try:
+            priority_value = _parse_priority(priority, queue)
+            chat_request = _build_chat_request(
+                messages=safe["messages"],
+                model=req.kwargs.get("model"),
+                temperature=req.kwargs.get("temperature"),
+                top_p=req.kwargs.get("top_p"),
+                max_tokens=req.kwargs.get("max_tokens"),
+                stop=req.kwargs.get("stop"),
+            )
+            if req.kwargs.get("stream"):
+                raise HTTPException(400, "Streaming is not supported for this endpoint")
+            result = await queue.enqueue(request_id, priority_value, chat_request, endpoint="/llm")
+        except HTTPException:
+            raise
+        except ValidationError as exc:
+            message = _humanize_validation_error(exc)
+            return _error_response(400, "invalid_request", message, request_id)
+        except QueueOverflowError as exc:
+            return _error_response(429, "queue_overflow", str(exc), request_id)
+        except ProviderError as exc:
+            logger.exception("Provider error for request %s at /llm", request_id)
+            return _error_response(500, "provider_error", str(exc), request_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Internal error for request %s at /llm", request_id)
+            return _error_response(500, "internal", str(exc), request_id)
+
+        return JSONResponse(content=result.response_body, headers=_metrics_headers(result, request_id))
+
     fn = getattr(llm, method_name)
 
     # 4) Оставляем только параметры, которые ждёт fn

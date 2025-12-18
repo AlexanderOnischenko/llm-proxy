@@ -27,7 +27,6 @@ WORKDIR /tmp
 COPY ./shared_pkg/                          /tmp/shared_pkg/
 RUN pip install --no-cache-dir -e /tmp/shared_pkg
 
-
 # 5) Создаем папки и выставляем права одним слоем
 RUN mkdir -p /home/${USER}/app/logs \
              ${CACHE_CONTAINER_DIR} \
@@ -40,20 +39,19 @@ WORKDIR /home/${USER}/app
 COPY --chown=${USER}:${GROUP} llm/src/.             .
 COPY --chown=${USER}:${GROUP} shared_pkg/           ./shared_pkg/
 COPY --chown=${USER}:${GROUP} src/domain/           ./domain/
+COPY --chown=${USER}:${GROUP} llm/entrypoint.sh     ./entrypoint.sh
 
+RUN chmod +x ./entrypoint.sh
 
 # DEBUG
 # RUN pip install debugpy
 # RUN apt-get update && apt-get install -y net-tools
 # END DEBUG
 
-
-
 # Copy mock server code
 # COPY config/                    ./config/
 # COPY src/utils/                 ./utils/
 
-
 # Expose LLM
 EXPOSE ${LLM_PORT}
-CMD uvicorn llm.main:app --host 0.0.0.0 --port ${LLM_PORT}
+CMD ["./entrypoint.sh"]
