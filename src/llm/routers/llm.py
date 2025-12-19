@@ -204,8 +204,9 @@ async def call_llm(
             if req.kwargs.get("stream"):
                 raise HTTPException(400, "Streaming is not supported for this endpoint")
             result = await queue.enqueue(request_id, priority_value, chat_request, endpoint="/llm")
-        except HTTPException:
-            raise
+        except HTTPException as exc:
+            detail = exc.detail if getattr(exc, "detail", None) else str(exc)
+            return _error_response(exc.status_code, "invalid_request", str(detail), request_id)
         except ValidationError as exc:
             message = _humanize_validation_error(exc)
             return _error_response(400, "invalid_request", message, request_id)
