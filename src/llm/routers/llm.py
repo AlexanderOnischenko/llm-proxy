@@ -203,7 +203,7 @@ async def call_llm(
             )
             if req.kwargs.get("stream"):
                 raise HTTPException(400, "Streaming is not supported for this endpoint")
-            result = await queue.enqueue(request_id, priority_value, chat_request, endpoint="/llm")
+            queue_result = await queue.enqueue(request_id, priority_value, chat_request, endpoint="/llm")
         except HTTPException as exc:
             detail = exc.detail if getattr(exc, "detail", None) else str(exc)
             return _error_response(exc.status_code, "invalid_request", str(detail), request_id)
@@ -219,7 +219,7 @@ async def call_llm(
             logger.exception("Internal error for request %s at /llm", request_id)
             return _error_response(500, "internal", str(exc), request_id)
 
-        return JSONResponse(content=result.response_body, headers=_metrics_headers(result, request_id))
+        return JSONResponse(content=queue_result.response_body, headers=_metrics_headers(queue_result, request_id))
 
     fn = getattr(llm, method_name)
 

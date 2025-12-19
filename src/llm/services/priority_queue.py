@@ -128,7 +128,7 @@ class PriorityChatQueue:
         return self._default_priority
 
     @property
-    def priorities(self) -> Iterable[str]:
+    def priorities(self) -> tuple[str, ...]:
         return tuple(self._priorities)
 
     async def enqueue(

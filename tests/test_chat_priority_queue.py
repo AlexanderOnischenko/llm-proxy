@@ -14,7 +14,7 @@ from shared_pkg.config.settings import reset_settings_overrides  # noqa: E402
 from prometheus_client import CONTENT_TYPE_LATEST  # noqa: E402
 
 
-def _chat_response(content: str, model: str) -> dict[str, Any]:
+def _chat_response(content: str, model: str | None) -> dict[str, Any]:
     return {
         "id": "chatcmpl-test",
         "object": "chat.completion",
