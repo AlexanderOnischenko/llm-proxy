@@ -43,6 +43,10 @@ def _parse_priority(raw_priority: str | None, queue: PriorityChatQueue) -> str:
     if raw_priority is None:
         return queue.default_priority
     lowered = raw_priority.lower()
+    if lowered in {"highest", "p0"}:
+        return queue.priorities[0]
+    if lowered == "lowest":
+        return queue.priorities[-1]
     if lowered not in queue.priorities:
         raise InvalidRequestError(f"Invalid priority header: {raw_priority!r}")
     return lowered
@@ -106,8 +110,20 @@ async def _handle_request(
         except json.JSONDecodeError as exc:  # noqa: B904
             raise InvalidRequestError("Invalid JSON payload") from exc
 
-        priority = _parse_priority(priority_header, queue)
+        body_priority = raw_body.get("priority") if isinstance(raw_body, dict) else None
+        priority = _parse_priority(priority_header or body_priority, queue)
         request_model = _parse_body(raw_body, request_id)
+        queue_state = await queue.snapshot()
+        logger.debug(
+            "Queue snapshot for incoming request",
+            extra={
+                "request_id": request_id,
+                "priority": priority,
+                "queue_len": queue_state.get("queue_len", {}),
+                "in_flight": queue_state.get("in_flight", {}),
+                "path": path,
+            },
+        )
         result = await queue.enqueue(request_id, priority, request_model, endpoint=path)
     except InvalidRequestError as exc:
         return _error_response(400, "invalid_request", str(exc), request_id)
@@ -121,7 +137,7 @@ async def _handle_request(
         return _error_response(500, "internal", str(exc), request_id)
 
     headers = _metrics_headers(result, request_id)
-    payload: dict[str, Any] = result.response_body
+    payload: dict[str, Any] = {**result.response_body, "request_id": request_id}
     if include_metrics_in_body:
         payload = {**payload, "metrics": _metrics_body(result)}
 

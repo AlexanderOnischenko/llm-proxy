@@ -49,13 +49,13 @@ _PROVIDER_LATENCY_SECONDS = Histogram(
     labelnames=["endpoint", "priority"],
     buckets=HISTOGRAM_BUCKETS_SECONDS,
 )
-_QUEUE_DEPTH = Gauge(
-    "llm_proxy_queue_depth",
+_QUEUE_LENGTH = Gauge(
+    "llm_proxy_queue_length",
     "Current number of queued chat requests per priority",
     labelnames=["priority"],
 )
 _INFLIGHT = Gauge(
-    "llm_proxy_inflight",
+    "llm_proxy_in_flight",
     "Current number of inflight chat requests per priority",
     labelnames=["priority"],
 )
@@ -114,7 +114,14 @@ class PriorityChatQueue:
         self._queues: Dict[str, Deque[QueuedChatRequest]] = {pr: deque() for pr in self._priorities}
         self._inflight: Dict[str, int] = {pr: 0 for pr in self._priorities}
         self._default_priority = default_priority if default_priority in self._priorities else self._priorities[0]
-        self._queue_gauge = _QUEUE_DEPTH
+        self._queue_gauge = _QUEUE_LENGTH
+
+    async def snapshot(self) -> dict[str, dict[str, int]]:
+        async with self._lock:
+            return {
+                "queue_len": {priority: len(queue) for priority, queue in self._queues.items()},
+                "in_flight": dict(self._inflight),
+            }
 
     @property
     def default_priority(self) -> str:
