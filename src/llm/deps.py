@@ -4,10 +4,28 @@ from fastapi import Depends
 from llm.services.client import CachedQueuedChatOpenAI, create_custom_llm
 from llm.services.chat_provider import OpenAIChatProvider
 from llm.services.priority_queue import PriorityChatQueue
+from llm.services.cache import SQLiteCache
 
 _llm_instance: CachedQueuedChatOpenAI | None = None
 _chat_provider: OpenAIChatProvider | None = None
 _chat_queue: PriorityChatQueue | None = None
+_shared_cache: SQLiteCache | None = None
+
+
+def build_cache(settings: Settings) -> SQLiteCache:
+    """Internal singleton builder for shared SQLite cache."""
+    global _shared_cache
+    if _shared_cache is None:
+        _shared_cache = SQLiteCache(
+            path=settings.llm_cache_path,
+            ttl_seconds=settings.llm_cache_ttl,
+            enabled=settings.llm_cache_enabled,
+        )
+    return _shared_cache
+
+
+def get_cache(settings: Settings = Depends(get_settings)) -> SQLiteCache:
+    return build_cache(settings)
 
 def build_llm(settings: Settings) -> CachedQueuedChatOpenAI:
     """
@@ -17,7 +35,7 @@ def build_llm(settings: Settings) -> CachedQueuedChatOpenAI:
     """
     global _llm_instance
     if _llm_instance is None:
-        _llm_instance = create_custom_llm(settings)
+        _llm_instance = create_custom_llm(settings, cache=build_cache(settings))
     return _llm_instance
 
 def get_llm(settings: Settings = Depends(get_settings)) -> CachedQueuedChatOpenAI:
@@ -30,7 +48,7 @@ def get_llm(settings: Settings = Depends(get_settings)) -> CachedQueuedChatOpenA
 def build_chat_provider(settings: Settings) -> OpenAIChatProvider:
     global _chat_provider
     if _chat_provider is None:
-        _chat_provider = OpenAIChatProvider(settings)
+        _chat_provider = OpenAIChatProvider(settings, cache=build_cache(settings))
     return _chat_provider
 
 
@@ -60,6 +78,10 @@ def get_chat_queue(
 
 
 def reset_chat_dependencies() -> None:
-    global _chat_queue, _chat_provider
+    global _chat_queue, _chat_provider, _llm_instance, _shared_cache
     _chat_queue = None
     _chat_provider = None
+    _llm_instance = None
+    if _shared_cache is not None:
+        _shared_cache.close()
+    _shared_cache = None

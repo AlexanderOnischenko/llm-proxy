@@ -3,9 +3,11 @@ from typing import Any, Dict
 
 from shared_pkg.config.settings import Settings
 from llm.services.wrapper import CachedQueuedChatOpenAI
+from llm.services.cache import SQLiteCache
 
 def create_custom_llm(
     settings: Settings,
+    cache: SQLiteCache | None = None,
     **override_kwargs: Any
 ) -> CachedQueuedChatOpenAI:
     """
@@ -31,4 +33,6 @@ def create_custom_llm(
     }
 
     params.update(override_kwargs)
+    if cache is not None:
+        params["cache"] = cache
     return CachedQueuedChatOpenAI(**params)
