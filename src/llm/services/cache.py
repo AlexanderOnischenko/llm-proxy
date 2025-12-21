@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import pickle
 import sqlite3
 import threading
@@ -78,6 +79,11 @@ class SQLiteCache:
             self._init_db()
 
     def _init_db(self) -> None:
+        # Ensure parent directory exists for file-backed caches.
+        if self.path != ":memory:":
+            directory = os.path.dirname(self.path)
+            if directory:
+                os.makedirs(directory, exist_ok=True)
         # timeout + WAL to avoid writer stalls
         self._conn = sqlite3.connect(self.path, check_same_thread=False, timeout=30)
         cur = self._conn.cursor()

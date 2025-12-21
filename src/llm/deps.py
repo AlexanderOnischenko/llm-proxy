@@ -16,8 +16,9 @@ def build_cache(settings: Settings) -> SQLiteCache:
     """Internal singleton builder for shared SQLite cache."""
     global _shared_cache
     if _shared_cache is None:
+        cache_path = getattr(settings, "llm_cache_path_resolved", None) or settings.llm_cache_path
         _shared_cache = SQLiteCache(
-            path=settings.llm_cache_path,
+            path=str(cache_path),
             ttl_seconds=settings.llm_cache_ttl,
             enabled=settings.llm_cache_enabled,
         )
