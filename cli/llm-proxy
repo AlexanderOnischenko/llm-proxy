@@ -1,0 +1,299 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Host-side CLI helper for running llm-proxy docker container with profiles.
+# Designed to be installed into ~/.local/bin/llm-proxy (or /usr/local/bin).
+
+LLM_PROXY_HOME="${LLM_PROXY_HOME:-$HOME/.llm-proxy}"
+PROFILES_DIR="$LLM_PROXY_HOME/profiles"
+CURRENT_LINK="$LLM_PROXY_HOME/current_profile"
+
+DEFAULT_IMAGE="${LLM_PROXY_IMAGE:-backplane/llm:latest}"
+
+_die() { echo "error: $*" >&2; exit 1; }
+_need() { command -v "$1" >/dev/null 2>&1 || _die "missing dependency: $1"; }
+
+_usage() {
+  cat >&2 <<'USAGE'
+llm-proxy — host-side CLI for llm-proxy docker image
+
+Usage:
+  llm-proxy init
+  llm-proxy up [--image IMAGE]
+  llm-proxy down
+  llm-proxy status
+  llm-proxy logs
+  llm-proxy health
+
+  llm-proxy profile list
+  llm-proxy profile use <name>
+  llm-proxy profile edit <name>
+  llm-proxy profile current
+
+Notes:
+  - Profiles are stored in ~/.llm-proxy/profiles/<name>.sh
+  - Current profile is a symlink ~/.llm-proxy/current_profile
+  - Secrets (LLM_API_KEY) should live only in your HOME, not in git.
+USAGE
+}
+
+_write_default_profiles() {
+  mkdir -p "$PROFILES_DIR"
+
+  # default profile template
+  if [[ ! -f "$PROFILES_DIR/default.sh" ]]; then
+    cat > "$PROFILES_DIR/default.sh" <<'PROFILE'
+#!/usr/bin/env bash
+
+# Настройки профиля
+export PROFILE_NAME="default"
+export LLM_API_BASE=""
+export LLM_API_KEY=""
+export LLM_MODEL_NAME=""
+
+# Базовые настройки
+export LLM_PORT=8002
+export CACHE_HOST_DIR="$HOME/.llm-proxy/cache/$PROFILE_NAME"
+export DUMP_HOST_DIR="$HOME/.llm-proxy/dumps/$PROFILE_NAME"
+export LOGS_HOST_DIR="$HOME/.llm-proxy/logs/$PROFILE_NAME"
+export CACHE_CONTAINER_DIR="/cache"
+export DUMP_CONTAINER_DIR="/dumps"
+export LOGS_CONTAINER_DIR="/logs"
+PROFILE
+    chmod 0644 "$PROFILES_DIR/default.sh"
+  fi
+
+  # example OpenRouter profile (NO secrets)
+  if [[ ! -f "$PROFILES_DIR/openrouter.example.sh" ]]; then
+    cat > "$PROFILES_DIR/openrouter.example.sh" <<'PROFILE'
+#!/usr/bin/env bash
+
+# Пример профиля (скопируйте в openrouter.sh и задайте ключ)
+export PROFILE_NAME="openrouter"
+export LLM_API_BASE="https://openrouter.ai/api/v1"
+export LLM_API_KEY=""
+export LLM_MODEL_NAME="gpt-4o-mini"  # пример
+
+export LLM_PORT=8002
+export CACHE_HOST_DIR="$HOME/.llm-proxy/cache/$PROFILE_NAME"
+export DUMP_HOST_DIR="$HOME/.llm-proxy/dumps/$PROFILE_NAME"
+export LOGS_HOST_DIR="$HOME/.llm-proxy/logs/$PROFILE_NAME"
+export CACHE_CONTAINER_DIR="/cache"
+export DUMP_CONTAINER_DIR="/dumps"
+export LOGS_CONTAINER_DIR="/logs"
+PROFILE
+    chmod 0644 "$PROFILES_DIR/openrouter.example.sh"
+  fi
+}
+
+_resolve_current_profile() {
+  if [[ -L "$CURRENT_LINK" ]]; then
+    local target
+    target="$(readlink "$CURRENT_LINK")"
+    # If link is relative, make it relative to home dir
+    if [[ "$target" != /* ]]; then
+      target="$LLM_PROXY_HOME/$target"
+    fi
+    echo "$target"
+    return
+  fi
+  echo "$PROFILES_DIR/default.sh"
+}
+
+_load_profile() {
+  local profile_path
+  profile_path="$(_resolve_current_profile)"
+
+  if [[ ! -f "$profile_path" ]]; then
+    _die "profile not found: $profile_path (run: llm-proxy init)"
+  fi
+
+  # shellcheck disable=SC1090
+  source "$profile_path"
+
+  # Backfill defaults like config.sh did
+  PROFILE_NAME="${PROFILE_NAME:-default}"
+  export PROFILE_NAME
+
+  export LLM_PORT="${LLM_PORT:-8002}"
+
+  export CACHE_HOST_DIR="${CACHE_HOST_DIR:-$HOME/.llm-proxy/cache/$PROFILE_NAME}"
+  export DUMP_HOST_DIR="${DUMP_HOST_DIR:-$HOME/.llm-proxy/dumps/$PROFILE_NAME}"
+  export LOGS_HOST_DIR="${LOGS_HOST_DIR:-$HOME/.llm-proxy/logs/$PROFILE_NAME}"
+
+  export CACHE_CONTAINER_DIR="${CACHE_CONTAINER_DIR:-/cache}"
+  export DUMP_CONTAINER_DIR="${DUMP_CONTAINER_DIR:-/dumps}"
+  export LOGS_CONTAINER_DIR="${LOGS_CONTAINER_DIR:-/logs}"
+
+  mkdir -p "$CACHE_HOST_DIR" "$DUMP_HOST_DIR" "$LOGS_HOST_DIR"
+}
+
+_container_name() {
+  echo "llm-proxy-${PROFILE_NAME:-default}"
+}
+
+_cmd_init() {
+  _write_default_profiles
+
+  # Create/refresh current profile symlink to default
+  mkdir -p "$LLM_PROXY_HOME"
+  ln -snf "$PROFILES_DIR/default.sh" "$CURRENT_LINK"
+
+  # Ensure data dirs exist
+  # shellcheck disable=SC1090
+  source "$PROFILES_DIR/default.sh"
+  mkdir -p "$HOME/.llm-proxy/cache/$PROFILE_NAME" "$HOME/.llm-proxy/dumps/$PROFILE_NAME" "$HOME/.llm-proxy/logs/$PROFILE_NAME"
+
+  echo "Initialized profiles in: $PROFILES_DIR" >&2
+  echo "Current profile: default" >&2
+}
+
+_cmd_profile_list() {
+  mkdir -p "$PROFILES_DIR"
+  ls -1 "$PROFILES_DIR" 2>/dev/null | sed -n 's/\.sh$//p' | sort
+}
+
+_cmd_profile_current() {
+  local p
+  p="$(_resolve_current_profile)"
+  if [[ -L "$CURRENT_LINK" ]]; then
+    echo "$(basename "$p" .sh)"  # current profile name
+  else
+    echo "default"
+  fi
+}
+
+_cmd_profile_use() {
+  local name="${1:-}"; [[ -n "$name" ]] || _die "profile name required"
+  local path="$PROFILES_DIR/${name}.sh"
+  [[ -f "$path" ]] || _die "profile file not found: $path"
+  ln -snf "$path" "$CURRENT_LINK"
+  echo "Using profile: $name" >&2
+}
+
+_cmd_profile_edit() {
+  local name="${1:-}"; [[ -n "$name" ]] || _die "profile name required"
+  local path="$PROFILES_DIR/${name}.sh"
+  [[ -f "$path" ]] || _die "profile file not found: $path"
+  local editor="${EDITOR:-nano}"
+  exec "$editor" "$path"
+}
+
+_cmd_up() {
+  _need docker
+
+  local image="$DEFAULT_IMAGE"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --image) image="$2"; shift 2;;
+      -h|--help) _usage; exit 0;;
+      *) _die "unknown arg: $1";;
+    esac
+  done
+
+  _load_profile
+
+  local cname
+  cname="$(_container_name)"
+
+  echo "Profile: ${PROFILE_NAME}" >&2
+  echo "Container: ${cname}" >&2
+  echo "Port: ${LLM_PORT}" >&2
+  echo "Model: ${LLM_MODEL_NAME:-<not set>}" >&2
+
+  # Stop/remove old container if exists
+  docker stop "$cname" >/dev/null 2>&1 || true
+  docker rm "$cname" >/dev/null 2>&1 || true
+
+  # Cache knobs (defaults match your current run.sh)
+  local cache_enabled="${LLM_CACHE_ENABLED:-True}"
+  local cache_ttl="${LLM_CACHE_TTL:-600000}"
+  local cache_file="${LLM_CACHE_FILE:-llm_cache.sqlite}"
+
+  # Build docker run command safely (no eval)
+  cmd=(docker run -d
+    --name "$cname"
+    --restart unless-stopped
+    -p "${LLM_PORT}:${LLM_PORT}"
+    -e "LLM_HOST=0.0.0.0"
+    -e "LLM_PORT=${LLM_PORT}"
+    -e "LOG_FILE_PATH=${LOGS_CONTAINER_DIR}/llm-errors.log"
+    -e "DUMP_DIR=${DUMP_CONTAINER_DIR}"
+    -e "LLM_CACHE_ENABLED=${cache_enabled}"
+    -e "LLM_CACHE_TTL=${cache_ttl}"
+    -e "LLM_CACHE_FILE=${cache_file}"
+    -v "${CACHE_HOST_DIR}:${CACHE_CONTAINER_DIR}"
+    -v "${DUMP_HOST_DIR}:${DUMP_CONTAINER_DIR}"
+    -v "${LOGS_HOST_DIR}:${LOGS_CONTAINER_DIR}"
+  )
+
+  [[ -n "${LLM_API_BASE:-}" ]] && cmd+=(-e "LLM_API_BASE=${LLM_API_BASE}")
+  [[ -n "${LLM_API_KEY:-}" ]]  && cmd+=(-e "LLM_API_KEY=${LLM_API_KEY}")
+  [[ -n "${LLM_MODEL_NAME:-}" ]] && cmd+=(-e "LLM_MODEL_NAME=${LLM_MODEL_NAME}")
+
+  cmd+=("$image")
+
+  "${cmd[@]}" >/dev/null
+
+  echo "Started: $cname" >&2
+  echo "Health: curl http://localhost:${LLM_PORT}/health" >&2
+}
+
+_cmd_down() {
+  _need docker
+  _load_profile
+  local cname
+  cname="$(_container_name)"
+  docker stop "$cname" >/dev/null 2>&1 || true
+  docker rm "$cname" >/dev/null 2>&1 || true
+  echo "Stopped: $cname" >&2
+}
+
+_cmd_status() {
+  _need docker
+  _load_profile
+  local cname
+  cname="$(_container_name)"
+  docker ps --filter "name=^/${cname}$" --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
+}
+
+_cmd_logs() {
+  _need docker
+  _load_profile
+  local cname
+  cname="$(_container_name)"
+  exec docker logs -f "$cname"
+}
+
+_cmd_health() {
+  _need curl
+  _load_profile
+  curl -sS "http://localhost:${LLM_PORT}/health" && echo
+}
+
+main() {
+  local cmd="${1:-}"; shift || true
+  case "$cmd" in
+    init) _cmd_init;;
+    up|run) _cmd_up "$@";;
+    down|stop) _cmd_down;;
+    status) _cmd_status;;
+    logs) _cmd_logs;;
+    health) _cmd_health;;
+    profile)
+      local sub="${1:-}"; shift || true
+      case "$sub" in
+        list) _cmd_profile_list;;
+        use) _cmd_profile_use "$@";;
+        edit) _cmd_profile_edit "$@";;
+        current) _cmd_profile_current;;
+        "") _usage; exit 1;;
+        *) _die "unknown profile subcommand: $sub";;
+      esac
+      ;;
+    -h|--help|help|"") _usage; exit 0;;
+    *) _die "unknown command: $cmd (use --help)";;
+  esac
+}
+
+main "$@"
