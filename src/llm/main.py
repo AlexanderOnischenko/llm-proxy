@@ -1,11 +1,14 @@
 import os
 
+from contextlib import asynccontextmanager
+
 # app/main.py
 from fastapi import FastAPI, Request, status
 from shared_pkg.config.settings import get_settings
 from llm.routers.llm import router as llm_router
 from llm.routers.chat import router as chat_router
 from llm.metrics.prometheus import router as metrics_router
+import llm.deps as llm_deps
 from shared_pkg.utils.logging_config import get_logger, configure_logging
 
 
@@ -53,12 +56,34 @@ def create_app() -> FastAPI:
     #     yield
     #     logger.info("Shutdown")
 
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        """Initialize shared dependencies (incl. cache) on startup.
+
+        We avoid making any network calls here.
+        """
+        settings = get_settings()
+        try:
+            # Shared cache (single instance for /llm and /v1/chat)
+            cache = llm_deps.build_cache(settings)
+            # Warm DI singletons (no provider calls)
+            llm_deps.build_llm(settings)
+            provider = llm_deps.build_chat_provider(settings)
+            llm_deps.build_chat_queue(settings, provider)
+            logger.info("Startup: cache initialized, dependencies warmed")
+            yield
+        finally:
+            # Best-effort close; safe in single-worker runtime
+            try:
+                cache.close()  # type: ignore[name-defined]
+            except Exception:
+                pass
+
     # Создаем FastAPI-приложение, передавая debug из настроек
     app = FastAPI(
         title="LLM Proxy API",
         version="1.0.0",
-#        lifespan=lifespan,
-#        debug=settings.debug
+        lifespan=lifespan,
     )
     
     @app.get("/health", tags=["health"], status_code=status.HTTP_200_OK)
