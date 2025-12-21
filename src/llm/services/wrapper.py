@@ -53,7 +53,9 @@ class CachedQueuedChatOpenAI(ChatOpenAI):
     cache_enabled: bool = Field(default=True, exclude=True)
     cache_path: str = Field(default=":memory:", exclude=True)
     cache_ttl: int = Field(default=0, exclude=True)
-    cache: SQLiteCache | None = Field(default=None, exclude=True)
+    # Do NOT use the name "cache": it exists on BaseLanguageModel with a different type
+    # (BaseCache | bool | None) and pyright flags overrides as incompatible.
+    bp_cache: SQLiteCache | None = Field(default=None, exclude=True)
 
     def __init__(self, **kwargs):
         # Custom params
@@ -61,7 +63,11 @@ class CachedQueuedChatOpenAI(ChatOpenAI):
         cache_path     = kwargs.pop("cache_path", ":memory:")
         cache_ttl      = kwargs.pop("cache_ttl", 0)
         max_concurrent = kwargs.pop("max_concurrent", 4)
-        cache: SQLiteCache | None = kwargs.pop("cache", None)
+        # Prefer explicit bp_cache injection. Also support passing SQLiteCache via
+        # kwarg "cache" (but only if it's our SQLiteCache; otherwise leave for LangChain).
+        bp_cache: SQLiteCache | None = kwargs.pop("bp_cache", None)
+        if bp_cache is None and isinstance(kwargs.get("cache"), SQLiteCache):
+            bp_cache = cast(SQLiteCache, kwargs.pop("cache"))
         # Init parent (ChatOpenAI)
         super().__init__(**kwargs)
 
@@ -69,6 +75,7 @@ class CachedQueuedChatOpenAI(ChatOpenAI):
         object.__setattr__(self, "cache_enabled",  cache_enabled)
         object.__setattr__(self, "cache_path",     cache_path)
         object.__setattr__(self, "cache_ttl",      cache_ttl)
+        object.__setattr__(self, "bp_cache",       bp_cache)
 
         # Async queue & inflight map
         self._sem = asyncio.Semaphore(max_concurrent)
@@ -76,13 +83,13 @@ class CachedQueuedChatOpenAI(ChatOpenAI):
 
         # Shared cache backend (preferred). If not provided, create a private one.
         if self.cache_enabled:
-            self._cache = cache or SQLiteCache(
+            self._cache = bp_cache or SQLiteCache(
                 path=self.cache_path,
                 ttl_seconds=self.cache_ttl,
                 enabled=True,
             )
         else:
-            self._cache = cache or SQLiteCache(
+            self._cache = bp_cache or SQLiteCache(
                 path=self.cache_path,
                 ttl_seconds=self.cache_ttl,
                 enabled=False,
@@ -195,12 +202,12 @@ class CachedQueuedChatOpenAI(ChatOpenAI):
 
     # -------------- async public API --------------
 
-    async def apredict(
+    async def apredict( # pyright: ignore[reportIncompatibleMethodOverride]
         self,
         prompt: str,
         stop: Optional[str] = None,
         sender: Optional[str] = None,
-    ) -> str:  # pyright: ignore[reportIncompatibleMethodOverride]
+    ) -> str:  
         method = "apredict"
         key = self._make_key(method, (prompt,), {"stop": stop, "sender": sender})
         if self.cache_enabled:
@@ -217,12 +224,12 @@ class CachedQueuedChatOpenAI(ChatOpenAI):
             self._set_cached(key, out)
         return out
 
-    async def acomplete(
+    async def acomplete( # pyright: ignore[reportIncompatibleMethodOverride]
         self,
         prompt: str,
         stop: Optional[str] = None,
         sender: Optional[str] = None,
-    ) -> LLMResult:  # pyright: ignore[reportIncompatibleMethodOverride]
+    ) -> LLMResult:  
         method = "acomplete"
         key = self._make_key(method, (prompt,), {"stop": stop, "sender": sender})
         if self.cache_enabled:
@@ -239,12 +246,12 @@ class CachedQueuedChatOpenAI(ChatOpenAI):
             self._set_cached(key, out)
         return out
 
-    async def abatch(
+    async def abatch( # pyright: ignore[reportIncompatibleMethodOverride]
         self,
         prompts: List[str],
         stop: Optional[str] = None,
         sender: Optional[str] = None,
-    ) -> LLMResult:  # pyright: ignore[reportIncompatibleMethodOverride]
+    ) -> LLMResult:  
         method = "abatch"
         key = self._make_key(method, (tuple(prompts),), {"stop": stop, "sender": sender})
         if self.cache_enabled:
@@ -262,7 +269,7 @@ class CachedQueuedChatOpenAI(ChatOpenAI):
             self._set_cached(key, out)
         return out
 
-    async def agenerate(
+    async def agenerate( # pyright: ignore[reportIncompatibleMethodOverride]
         self,
         messages: List[Union[BaseMessage, dict]],
         stop: Optional[List[str]] = None,
@@ -271,7 +278,7 @@ class CachedQueuedChatOpenAI(ChatOpenAI):
         metadata: Optional[Dict[str, Any]] = None,
         run_manager: Any = None,
         sender: Optional[str] = None,
-    ) -> ChatResult:  # pyright: ignore[reportIncompatibleMethodOverride]
+    ) -> ChatResult:  
         method = "agenerate"
         msgs = self._normalize_messages(messages)
         msgs = [msgs]
@@ -301,7 +308,7 @@ class CachedQueuedChatOpenAI(ChatOpenAI):
             self._set_cached(key, out)
         return out
 
-    async def ainvoke(
+    async def ainvoke( # pyright: ignore[reportIncompatibleMethodOverride]
         self,
         input: Optional[Union[PromptValue, str]] = None,
         /,
@@ -313,7 +320,7 @@ class CachedQueuedChatOpenAI(ChatOpenAI):
         metadata: Optional[Dict[str, Any]] = None,
         run_manager: Any = None,
         sender: Optional[str] = None,
-    ) -> ChatResult:  # pyright: ignore[reportIncompatibleMethodOverride]
+    ) -> ChatResult:  
         method = "ainvoke"
         key_args: tuple[Any, ...]
         if messages is not None:
