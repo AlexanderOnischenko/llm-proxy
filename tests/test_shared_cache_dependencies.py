@@ -3,7 +3,6 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any, cast
 
-import pytest
 
 
 def test_deps_build_cache_singleton(tmp_path):

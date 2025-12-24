@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 
 # app/main.py
 from fastapi import FastAPI, Request, status
-from shared_pkg.config.settings import get_settings
+from llm.config.settings import get_settings
 from llm.routers.llm import router as llm_router
 from llm.routers.chat import router as chat_router
 from llm.metrics.prometheus import router as metrics_router

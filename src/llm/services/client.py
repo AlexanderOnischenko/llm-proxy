@@ -1,7 +1,7 @@
 # services/llm/client.py
 from typing import Any, Dict
 
-from shared_pkg.config.settings import Settings
+from llm.config.settings import Settings
 from llm.services.wrapper import CachedQueuedChatOpenAI
 from llm.services.cache import SQLiteCache
 
@@ -21,7 +21,6 @@ def create_custom_llm(
         "model_name":       settings.llm_model_name,
         "model":            settings.llm_model_name,
         "temperature":     settings.llm_temperature,
-        "base_url": str(settings.llm_api_base),
         "api_key":  settings.llm_api_key,
         "verbose":         settings.llm_verbose,
         "max_tokens":      settings.llm_max_tokens,

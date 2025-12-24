@@ -1,17 +1,10 @@
 # llm/services/chat_provider.py
 from __future__ import annotations
 
-import hashlib
-import json
-import os
-import pickle
-import sqlite3
-import threading
-import time
 from typing import Any
 
 from openai import AsyncOpenAI, OpenAIError
-from shared_pkg.config.settings import Settings
+from llm.config.settings import Settings
 from shared_pkg.utils.logging_config import get_logger
 from llm.models.chat import ChatCompletionRequest
 from llm.services.cache import SQLiteCache, make_key

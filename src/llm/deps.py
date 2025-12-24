@@ -1,5 +1,5 @@
 # src/deps.py
-from shared_pkg.config.settings import Settings, get_settings
+from llm.config.settings import Settings, get_settings
 from fastapi import Depends
 from llm.services.client import CachedQueuedChatOpenAI, create_custom_llm
 from llm.services.chat_provider import OpenAIChatProvider

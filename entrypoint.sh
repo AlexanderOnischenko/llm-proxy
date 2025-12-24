@@ -27,7 +27,7 @@ if [[ -n "${UVICORN_WORKERS:-}" && "${UVICORN_WORKERS}" != "1" ]]; then
 fi
 
 HOST="${LLM_HOST:-0.0.0.0}"
-PORT="${LLM_PORT:-8002}"
+LLM_PORT="${LLM_PORT:-${PORT:-8002}}"
 APP_MODULE="${APP_MODULE:-llm.main:app}"
 
-exec uvicorn "$APP_MODULE" --host "$HOST" --port "$PORT"
+exec uvicorn "$APP_MODULE" --host "$HOST" --port "$LLM_PORT"
