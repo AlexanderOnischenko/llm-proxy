@@ -3,9 +3,12 @@ from __future__ import annotations
 
 import inspect
 import json
-from typing import Any, Protocol, runtime_checkable
 
+from typing import Any, Protocol
+
+import httpx
 from openai import AsyncOpenAI, OpenAIError
+from langchain_gigachat import GigaChat
 
 from llm.config.settings import Settings as llm_Settnigs
 from llm.models.chat import ChatCompletionRequest
@@ -14,11 +17,18 @@ from shared_pkg.utils.logging_config import get_logger
 
 logger = get_logger(__name__)
 
+class ChatProvider(Protocol):
+    async def complete(self, request: ChatCompletionRequest) -> dict[str, Any]:
+        ...
+
+    async def aclose(self) -> None:
+        ...
+
 
 def _as_jsonable_content(content: Any) -> str:
     """GigaChat expects message.content to be a string.
 
-    Our public schema allows str | list[str|dict]. For non-str, we serialize.
+    Our public schema allows str | list[str|dict] | dict. For non-str, we serialize.
     """
     if isinstance(content, str):
         return content
@@ -30,6 +40,7 @@ def _as_jsonable_content(content: Any) -> str:
 
 def _dump_obj(obj: Any) -> Any:
     """Best-effort conversion to dict for SDK responses."""
+    
     if isinstance(obj, dict):
         return obj
     if hasattr(obj, "model_dump"):
@@ -44,31 +55,62 @@ def _dump_obj(obj: Any) -> Any:
     return obj
 
 
-@runtime_checkable
-class ChatProvider(Protocol):
-    """Typed interface for chat providers used by /v1/chat.
+def _build_httpx_client(settings: llm_Settnigs) -> httpx.AsyncClient:
+    """Build an httpx client with optional mTLS and custom CA bundle."""
 
-    Keep this minimal and stable; providers may be backed by different SDKs.
-    """
+    cert_file = getattr(settings, "llm_cert_file", None)
+    key_file = getattr(settings, "llm_key_file", None)
+    ca_bundle = getattr(settings, "llm_ca_bundle_file", None)
+    verify_ssl = bool(getattr(settings, "llm_verify_ssl", True))
 
-    async def complete(self, request: ChatCompletionRequest) -> dict[str, Any]:
-        ...
+    if bool(cert_file) ^ bool(key_file):
+        raise ValueError("Both LLM_CERT_FILE and LLM_KEY_FILE must be set together")
 
-    async def aclose(self) -> None:
-        ...
+    cert: tuple[str, str] | None = None
+    if cert_file and key_file:
+        cert = (str(cert_file), str(key_file))
+
+    # httpx.verify accepts bool or path to CA bundle
+    verify: bool | str = bool(verify_ssl)
+    if ca_bundle:
+        verify = str(ca_bundle)
+
+    timeout = float(getattr(settings, "llm_timeout", 300.0) or 300.0)
+
+    return httpx.AsyncClient(timeout=timeout, verify=verify, cert=cert)
 
 
 class OpenAIChatProvider:
+    """OpenAI-compatible provider using the official OpenAI SDK.
+
+    Supports optional mTLS (cert+key) and custom CA bundle by injecting a configured
+    httpx client into AsyncOpenAI.
+    """
+
     def __init__(self, settings: llm_Settnigs, *, cache: SQLiteCache | None = None):
-        self._client = AsyncOpenAI(
-            api_key=settings.llm_api_key,
-            base_url=str(settings.llm_api_base),
-            timeout=settings.llm_timeout,
-        )
         self._base_url = str(settings.llm_api_base)
         self._default_model = settings.llm_model_name
         self._default_temperature = settings.llm_temperature
         self._default_top_p = settings.llm_top_p
+
+        # Transport options (optional): mTLS cert/key, custom CA bundle, verify flag.
+        # Build only if needed to avoid opening extra connections in the common case.
+        self._http_client: httpx.AsyncClient | None = None
+        if (
+            getattr(settings, "llm_cert_file", None)
+            or getattr(settings, "llm_key_file", None)
+            or getattr(settings, "llm_ca_bundle_file", None)
+            or not bool(getattr(settings, "llm_verify_ssl", True))
+        ):
+            self._http_client = _build_httpx_client(settings)
+
+        self._client = AsyncOpenAI(
+            api_key=settings.llm_api_key,
+            base_url=self._base_url,
+            timeout=float(getattr(settings, "llm_timeout", 300.0) or 300.0),
+            http_client=self._http_client,
+        )
+
         # Prefer injected shared cache (from deps.build_cache).
         if cache is not None:
             self._cache = cache
@@ -116,34 +158,27 @@ class OpenAIChatProvider:
         def _on_miss(k: str) -> None:
             logger.info("[CACHE MISS] /v1/chat key=%s model=%s", k, payload.get("model"))
 
-        # SQLiteCache handles disabled mode internally.
         return await self._cache.aget_or_set(key, _call_provider, on_hit=_on_hit, on_miss=_on_miss)
 
     async def aclose(self) -> None:
-        """Best-effort close of underlying HTTP client."""
+        # Best-effort close; provider lifetime is typically process-long.
         close = getattr(self._client, "close", None)
         if callable(close):
-            result = close()
-            if inspect.isawaitable(result):
-                await result
+            res = close()
+            if inspect.isawaitable(res):
+                await res
+        if self._http_client is not None:
+            await self._http_client.aclose()
 
 
-class GigaChatChatProvider:
-    """Native GigaChat provider.
+class GigaChatProvider:
+    """Native GigaChat provider using the official `gigachat` SDK.
 
-    Uses the official `gigachat` Python SDK under the hood. The SDK supports
-    mTLS options (cert/key/CA bundle) and async requests.
+    GigaChat requires mTLS (client cert/key) for requests. CA bundle may also
+    be required in some environments.
     """
 
     def __init__(self, settings: llm_Settnigs, *, cache: SQLiteCache | None = None):
-        try:
-            from gigachat import GigaChat  # type: ignore
-        except Exception as e:  # noqa: BLE001
-            raise RuntimeError(
-                "GigaChat provider is enabled, but the 'gigachat' SDK is not installed. "
-                "Add 'gigachat' (or 'langchain-gigachat', which depends on it) to your image."
-            ) from e
-
         self._base_url = str(settings.llm_api_base)
         self._default_model = settings.llm_model_name
 
@@ -155,7 +190,7 @@ class GigaChatChatProvider:
             auth_url=getattr(settings, "llm_auth_url", None),
             scope=getattr(settings, "llm_scope", None),
             timeout=float(getattr(settings, "llm_timeout", 300.0) or 300.0),
-            verify_ssl_certs=bool(getattr(settings, "llm_verify_ssl_certs", True)),
+            verify_ssl_certs=bool(getattr(settings, "llm_verify_ssl", True)),
             ca_bundle_file=getattr(settings, "llm_ca_bundle_file", None),
             cert_file=getattr(settings, "llm_cert_file", None),
             key_file=getattr(settings, "llm_key_file", None),
@@ -189,24 +224,20 @@ class GigaChatChatProvider:
             ],
         }
 
-        # Optional generation params (OpenAI-like naming, matches GigaChat SDK payload style).
         if request.temperature is not None:
             payload["temperature"] = float(request.temperature)
         if request.top_p is not None:
             payload["top_p"] = float(request.top_p)
         if request.max_tokens is not None:
             payload["max_tokens"] = int(request.max_tokens)
-        if request.stop:
+        if request.stop is not None:
             payload["stop"] = request.stop
 
         key = self._cache_key(payload)
 
         async def _call_provider() -> dict[str, Any]:
-            # The SDK exposes async chat via `achat(payload)`.
             response = await self._client.achat(payload)  # type: ignore[attr-defined]
-            dumped = _dump_obj(response)
-            # Response shape is OpenAI-like (choices/message/content); keep as-is.
-            return dumped  # type: ignore[no-any-return]
+            return _dump_obj(response)  # type: ignore[no-any-return]
 
         def _on_hit(k: str) -> None:
             logger.info("[CACHE HIT] /v1/chat key=%s provider=gigachat model=%s", k, model)
@@ -217,17 +248,11 @@ class GigaChatChatProvider:
         return await self._cache.aget_or_set(key, _call_provider, on_hit=_on_hit, on_miss=_on_miss)
 
     async def aclose(self) -> None:
-        """Best-effort close of underlying client, if supported."""
-        close = getattr(self._client, "close", None)
+        close = getattr(self._client, "aclose", None)
         if callable(close):
-            result = close()
-            if inspect.isawaitable(result):
-                await result
-        aclose = getattr(self._client, "aclose", None)
-        if callable(aclose):
-            result = aclose()
-            if inspect.isawaitable(result):
-                await result
+            res = close()
+            if inspect.isawaitable(res):
+                await res
 
 
 def make_chat_provider(settings: llm_Settnigs, *, cache: SQLiteCache | None = None) -> ChatProvider:
@@ -240,5 +265,5 @@ def make_chat_provider(settings: llm_Settnigs, *, cache: SQLiteCache | None = No
         provider = "gigachat" if "gigachat" in base or "giga.chat" in base else "openai"
 
     if provider == "gigachat":
-        return GigaChatChatProvider(settings, cache=cache)
+        return GigaChatProvider(settings, cache=cache)
     return OpenAIChatProvider(settings, cache=cache)

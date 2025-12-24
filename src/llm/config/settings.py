@@ -32,7 +32,25 @@ class Settings(BaseSettings):
     llm_verbose:       bool          = Field(True,                validation_alias="LLM_VERBOSE")
     llm_timeout:       float         = Field(300.0, validation_alias="LLM_TIMEOUT")
 
-        #  Настройки очередей
+    # Provider selection
+    # - "openai": OpenAI-compatible /v1 endpoints
+    # - "gigachat": GigaChat upstream (requires mTLS)
+    llm_provider:      str           = Field("openai",            validation_alias="LLM_PROVIDER")
+
+    # TLS / mTLS
+    # Used by GigaChat (cert+key per request) and optionally for OpenAI-compatible upstreams.
+    # Env var is historical: LLM_VERIFY_SSL_CERTS.
+    llm_verify_ssl: bool            = Field(True,                 validation_alias="LLM_VERIFY_SSL_CERTS")
+    llm_ca_bundle_file: str | None  = Field(None,                 validation_alias="LLM_CA_BUNDLE_FILE")
+    llm_cert_file: str | None       = Field(None,                 validation_alias="LLM_CERT_FILE")
+    llm_key_file: str | None        = Field(None,                 validation_alias="LLM_KEY_FILE")
+    llm_key_file_password: str | None = Field(None,               validation_alias="LLM_KEY_FILE_PASSWORD")
+
+    # GigaChat-specific
+    llm_scope: str | None            = Field(None,                validation_alias="LLM_SCOPE")
+    llm_auth_url: str | None         = Field(None,                validation_alias="LLM_AUTH_URL")
+
+    #  Настройки очередей
     llm_max_concurrent:int           = Field(1,                   validation_alias="LLM_MAX_CONCURRENT")
     llm_priority_slots: dict[str, int] = Field(
         default_factory=lambda: {"p1": 2, "p2": 1, "p3": 1}, validation_alias="LLM_PRIORITY_SLOTS"
@@ -71,6 +89,11 @@ class Settings(BaseSettings):
     @property
     def is_testing(self) -> bool:
         return self.testing or self.environment.lower() == "testing"
+
+    # Backward-compatible alias (older code / SDKs use this name)
+    @property
+    def llm_verify_ssl_certs(self) -> bool:
+        return bool(self.llm_verify_ssl)
     
     @property
     def debug(self) -> bool:
