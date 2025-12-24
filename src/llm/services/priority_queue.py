@@ -4,7 +4,7 @@ import asyncio
 import time
 from collections import deque
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Deque, Dict, Iterable
+from typing import Any, Awaitable, Callable, Deque, Dict
 
 from llm.models.chat import ChatCompletionRequest
 
