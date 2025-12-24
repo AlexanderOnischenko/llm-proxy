@@ -88,6 +88,7 @@ class OpenAIChatProvider:
     def __init__(self, settings: llm_Settnigs, *, cache: SQLiteCache | None = None):
         self._base_url = str(settings.llm_api_base)
         self._default_model = settings.llm_model_name
+
         self._default_temperature = settings.llm_temperature
         self._default_top_p = settings.llm_top_p
 
@@ -180,12 +181,18 @@ class GigaChatProvider:
         self._base_url = str(settings.llm_api_base)
         self._default_model = settings.llm_model_name
 
+        # GigaChat in our deployments requires mTLS on every request.
+        cert_file = getattr(settings, "llm_cert_file", None)
+        key_file = getattr(settings, "llm_key_file", None)
+        if not cert_file or not key_file:
+            raise ValueError("GigaChat requires both LLM_CERT_FILE and LLM_KEY_FILE (mTLS)")
+
         # Local import: allow the rest of the project to work without gigachat extras.
         try:
-            from langchain_gigachat import GigaChat  # type: ignore
+            from gigachat import GigaChat  # type: ignore
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError(
-                "langchain_gigachat is required when LLM_PROVIDER=gigachat"
+                "gigachat is required when LLM_PROVIDER=gigachat"
             ) from exc
 
         # NOTE: Settings names mirror gigachat SDK options.
@@ -242,7 +249,29 @@ class GigaChatProvider:
         key = self._cache_key(payload)
 
         async def _call_provider() -> dict[str, Any]:
-            response = await self._client.achat(payload)  # type: ignore[attr-defined]
+            # Local import: allow the rest of the project to work without gigachat extras.
+            try:
+                from gigachat.models import Chat, Messages  # type: ignore
+            except Exception as exc:  # noqa: BLE001
+                raise RuntimeError("gigachat is required when LLM_PROVIDER=gigachat") from exc
+
+            chat_payload: dict[str, Any] = {
+                "model": model,
+                "messages": [
+                    Messages(role=m["role"], content=m["content"]) for m in payload["messages"]
+                ],
+            }
+            for k in ("temperature", "top_p", "max_tokens", "stop"):
+                if k in payload:
+                    chat_payload[k] = payload[k]
+
+            # Drop unsupported keys depending on SDK version (pydantic v1/v2).
+            fields = getattr(Chat, "__fields__", None) or getattr(Chat, "model_fields", None) or {}
+            allowed = set(fields) if isinstance(fields, dict) else set(fields)
+            filtered = {k: v for k, v in chat_payload.items() if k in allowed} if allowed else chat_payload
+
+            chat = Chat(**filtered)  # type: ignore[arg-type]
+            response = await self._client.achat(chat)  # type: ignore[attr-defined]
             return _dump_obj(response)  # type: ignore[no-any-return]
 
         def _on_hit(k: str) -> None:
@@ -254,7 +283,15 @@ class GigaChatProvider:
         return await self._cache.aget_or_set(key, _call_provider, on_hit=_on_hit, on_miss=_on_miss)
 
     async def aclose(self) -> None:
-        close = getattr(self._client, "aclose", None)
+        # Best-effort close; provider lifetime is typically process-long.
+        aclose = getattr(self._client, "aclose", None)
+        if callable(aclose):
+            res = aclose()
+            if inspect.isawaitable(res):
+                await res
+            return
+
+        close = getattr(self._client, "close", None)
         if callable(close):
             res = close()
             if inspect.isawaitable(res):

@@ -116,25 +116,27 @@ async def test_chat_provider_cache_key_changes_when_params_change(tmp_path, monk
 
 
 def test_make_chat_provider_selects_gigachat_when_requested(tmp_path, monkeypatch):
-    pytest.importorskip("langchain_gigachat")
+    pytest.importorskip("gigachat")
 
-    import langchain_gigachat
+    import gigachat
     from llm.services.chat_provider import GigaChatProvider
 
     class DummyGigaChat:
         def __init__(self, *args: Any, **kwargs: Any) -> None:  # noqa: ANN401
             return None
 
-        async def achat(self, payload: dict[str, Any]) -> dict[str, Any]:
-            return {"ok": True, "payload": payload}
+        async def achat(self, req: Any) -> dict[str, Any]:
+            return {"ok": True, "req": req}
 
         async def aclose(self) -> None:
             return None
 
-    monkeypatch.setattr(langchain_gigachat, "GigaChat", DummyGigaChat)
+    monkeypatch.setattr(gigachat, "GigaChat", DummyGigaChat)
 
     settings = DummySettings(cache_path=str(tmp_path / "cache.sqlite"))
     settings.llm_provider = "gigachat"
+    settings.llm_cert_file = "/tmp/cert.pem"
+    settings.llm_key_file = "/tmp/key.pem"
 
     provider = make_chat_provider(cast(Any, settings), cache=None)
     assert isinstance(provider, GigaChatProvider)
