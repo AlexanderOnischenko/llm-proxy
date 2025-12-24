@@ -1,12 +1,10 @@
 # llm/config/settings.py
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Mapping, cast
 
 from pydantic import AnyHttpUrl, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
-from functools import lru_cache
-
 
 _MODEL_CONFIG = SettingsConfigDict(
     populate_by_name=True,

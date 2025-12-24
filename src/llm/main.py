@@ -1,16 +1,15 @@
 import os
-
 from contextlib import asynccontextmanager
 
 # app/main.py
 from fastapi import FastAPI, Request, status
-from llm.config.settings import get_settings
-from llm.routers.llm import router as llm_router
-from llm.routers.chat import router as chat_router
-from llm.metrics.prometheus import router as metrics_router
-import llm.deps as llm_deps
-from shared_pkg.utils.logging_config import get_logger, configure_logging
 
+import llm.deps as llm_deps
+from llm.config.settings import get_settings
+from llm.metrics.prometheus import router as metrics_router
+from llm.routers.chat import router as chat_router
+from llm.routers.llm import router as llm_router
+from shared_pkg.utils.logging_config import configure_logging, get_logger
 
 logger = get_logger(__name__)
 

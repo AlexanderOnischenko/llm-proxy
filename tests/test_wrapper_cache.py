@@ -11,8 +11,8 @@ async def test_wrapper_apredict_uses_cache(tmp_path, monkeypatch, caplog):
     pytest.importorskip("langchain_openai")
     pytest.importorskip("langchain_core")
 
-    from langchain_openai import ChatOpenAI
     from langchain_core.messages import AIMessage
+    from langchain_openai import ChatOpenAI
     from pydantic import SecretStr
 
     from llm.services.cache import SQLiteCache
@@ -65,8 +65,8 @@ async def test_wrapper_cache_key_includes_llm_params(tmp_path, monkeypatch):
     pytest.importorskip("langchain_openai")
     pytest.importorskip("langchain_core")
 
-    from langchain_openai import ChatOpenAI
     from langchain_core.messages import AIMessage
+    from langchain_openai import ChatOpenAI
     from pydantic import SecretStr
 
     from llm.services.cache import SQLiteCache

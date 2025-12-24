@@ -14,6 +14,7 @@ from llm.config.settings import Settings
 from llm.services.cache import SQLiteCache
 from llm.services.wrapper import CachedQueuedChatOpenAI
 
+
 def create_custom_llm(
     settings: Settings,
     cache: SQLiteCache | None = None,

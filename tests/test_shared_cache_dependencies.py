@@ -4,7 +4,6 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 
-
 def test_deps_build_cache_singleton(tmp_path):
     import llm.deps as llm_deps
 

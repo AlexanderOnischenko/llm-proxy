@@ -6,11 +6,12 @@ from httpx import ASGITransport, AsyncClient
 
 pytestmark = pytest.mark.anyio
 
-from llm.main import app  # noqa: E402
+from prometheus_client import CONTENT_TYPE_LATEST  # noqa: E402
+
 from llm.deps import get_chat_queue, get_llm, reset_chat_dependencies  # noqa: E402
+from llm.main import app  # noqa: E402
 from llm.models.chat import ChatCompletionRequest  # noqa: E402
 from llm.services.priority_queue import PriorityChatQueue  # noqa: E402
-from prometheus_client import CONTENT_TYPE_LATEST  # noqa: E402
 
 
 def _chat_response(content: str, model: str | None) -> dict[str, Any]:

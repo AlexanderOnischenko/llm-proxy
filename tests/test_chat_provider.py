@@ -119,6 +119,7 @@ def test_make_chat_provider_selects_gigachat_when_requested(tmp_path, monkeypatc
     pytest.importorskip("gigachat")
 
     import gigachat
+
     from llm.services.chat_provider import GigaChatProvider
 
     class DummyGigaChat:

@@ -4,9 +4,9 @@ import importlib
 import importlib.util
 import sys
 import types
+from collections.abc import Generator
 from typing import Any, cast
 
-from collections.abc import Generator
 import pytest
 
 from llm.config.settings import reset_settings_overrides
