@@ -1,118 +1,116 @@
 # llm/services/wrapper.py
+
+from __future__ import annotations
+
 import asyncio
-from pydantic import ConfigDict, Field
-from typing import List, Optional, Any, Dict, Union, cast
+import logging
 from contextlib import contextmanager
+from typing import Any, Dict, Iterable, Protocol, Union, cast, runtime_checkable
+
+from langchain_core.callbacks.stdout import StdOutCallbackHandler
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.prompt_values import PromptValue
 
 from llm.services.cache import SQLiteCache, make_key
 
-from langchain_core.callbacks.stdout import StdOutCallbackHandler
-from langchain_openai import ChatOpenAI
+
+logger = logging.getLogger(__name__)
 
 
-from langchain_core.messages import BaseMessage
-
-from langchain_core.messages import HumanMessage
-
-from langchain_core.messages import AIMessage
-
-from langchain_core.messages import SystemMessage
-
-from langchain_core.outputs import LLMResult
-
-from langchain_core.outputs import ChatResult
-
-from langchain_core.prompt_values import PromptValue
-
-from shared_pkg.utils.logging_config import get_logger
-
-logger = get_logger(__name__)
-
-# ───────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 # Silence verbose on_chat_model_start spam in logs
-# ───────────────────────────────────────────────────────────
-def _no_op_on_chat_model_start(self, serialized: dict, messages: list[Any], **kwargs):
-    logger.info(f"[LLM START] model={serialized.get('model_name')}  messages={len(messages)}")
-    return None
+# ---------------------------------------------------------------------------
+def _no_op_on_chat_model_start(self, serialized: dict, messages: list[Any], **kwargs: Any) -> None:
+    logger.info("[LLM START] model=%s messages=%s", serialized.get("model_name"), len(messages))
+
+
 StdOutCallbackHandler.on_chat_model_start = _no_op_on_chat_model_start
 
 
-class CachedQueuedChatOpenAI(ChatOpenAI):
+# ---------------------------------------------------------------------------
+# Public (stable) async contract we rely on.
+# We intentionally do NOT call provider-specific helpers like `.apredict/.agenerate/.acomplete`.
+# ---------------------------------------------------------------------------
+
+# Runnable input accepted by most LangChain chat models.
+LanguageModelInput = Union[str, PromptValue, list[BaseMessage]]
+
+# Wrapper convenience: accept dict messages and normalize to BaseMessage.
+MessageLike = Union[BaseMessage, dict[str, Any]]
+WrapperInput = Union[str, PromptValue, list[MessageLike]]
+
+
+@runtime_checkable
+class AsyncChatRunnable(Protocol):
+    async def ainvoke(self, input: LanguageModelInput, config: Any = None, **kwargs: Any) -> BaseMessage:  # noqa: A002
+        ...
+
+
+class CachedQueuedChatOpenAI:
+    """Async wrapper that adds cache + concurrency limit + in-flight de-dup.
+
+    Despite the historical name, this wrapper is **not** tied to ChatOpenAI.
+    It works with any LangChain chat model that implements the public Runnable
+    async method: `ainvoke`.
+
+    Public surface is intentionally small:
+      - `ainvoke(...) -> BaseMessage`
+      - `apredict(...) -> str` (thin compatibility facade)
+      - `no_cache()` context manager
     """
-    ChatOpenAI with:
-      - SQLite cache (optional)
-      - Async concurrency limiter (asyncio.Semaphore)
-      - In-flight deduplication for identical requests
-      - No thread executors; all calls use native async methods
-    """
-    model_config = ConfigDict(extra="ignore", arbitrary_types_allowed=True)
 
-    # NOTE: ChatOpenAI is a pydantic model with dynamic fields.
-    # These annotations exist primarily for static type checkers (pyright).
-    cache_enabled: bool = Field(default=True, exclude=True)
-    cache_path: str = Field(default=":memory:", exclude=True)
-    cache_ttl: int = Field(default=0, exclude=True)
-    # Do NOT use the name "cache": it exists on BaseLanguageModel with a different type
-    # (BaseCache | bool | None) and pyright flags overrides as incompatible.
-    bp_cache: SQLiteCache | None = Field(default=None, exclude=True)
+    def __init__(
+        self,
+        *,
+        model: AsyncChatRunnable,
+        cache_enabled: bool = True,
+        cache_path: str = ":memory:",
+        cache_ttl: int = 0,
+        max_concurrent: int = 4,
+        bp_cache: SQLiteCache | None = None,
+        cache: SQLiteCache | None = None,
+    ) -> None:
+        if cache is not None and bp_cache is None:
+            bp_cache = cache
 
-    def __init__(self, **kwargs):
-        # Custom params
-        cache_enabled  = kwargs.pop("cache_enabled", True)
-        cache_path     = kwargs.pop("cache_path", ":memory:")
-        cache_ttl      = kwargs.pop("cache_ttl", 0)
-        max_concurrent = kwargs.pop("max_concurrent", 4)
-        # Prefer explicit bp_cache injection. Also support passing SQLiteCache via
-        # kwarg "cache" (but only if it's our SQLiteCache; otherwise leave for LangChain).
-        bp_cache: SQLiteCache | None = kwargs.pop("bp_cache", None)
-        if bp_cache is None and isinstance(kwargs.get("cache"), SQLiteCache):
-            bp_cache = cast(SQLiteCache, kwargs.pop("cache"))
-        # Init parent (ChatOpenAI)
-        super().__init__(**kwargs)
+        self._model: AsyncChatRunnable = model
 
-        # Store custom params
-        object.__setattr__(self, "cache_enabled",  cache_enabled)
-        object.__setattr__(self, "cache_path",     cache_path)
-        object.__setattr__(self, "cache_ttl",      cache_ttl)
-        object.__setattr__(self, "bp_cache",       bp_cache)
+        self.cache_enabled = bool(cache_enabled)
+        self.cache_path = cache_path
+        self.cache_ttl = int(cache_ttl or 0)
 
-        # Async queue & inflight map
-        self._sem = asyncio.Semaphore(max_concurrent)
-        self._inflight: Dict[str, asyncio.Future] = {}
+        self._sem = asyncio.Semaphore(max(int(max_concurrent or 1), 1))
+        self._inflight: dict[str, asyncio.Future[Any]] = {}
 
         # Shared cache backend (preferred). If not provided, create a private one.
-        if self.cache_enabled:
-            self._cache = bp_cache or SQLiteCache(
-                path=self.cache_path,
-                ttl_seconds=self.cache_ttl,
-                enabled=True,
-            )
-        else:
-            self._cache = bp_cache or SQLiteCache(
-                path=self.cache_path,
-                ttl_seconds=self.cache_ttl,
-                enabled=False,
-            )
+        self._cache = bp_cache or SQLiteCache(
+            path=self.cache_path,
+            ttl_seconds=self.cache_ttl,
+            enabled=self.cache_enabled,
+        )
 
-    # -------------- utilities --------------
+    # ------------------------------------------------------------------
+    # utilities
+    # ------------------------------------------------------------------
 
     @contextmanager
     def no_cache(self):
         prev = self.cache_enabled
-        object.__setattr__(self, "cache_enabled", False)
+        self.cache_enabled = False
         try:
             yield
         finally:
-            object.__setattr__(self, "cache_enabled", prev)
+            self.cache_enabled = prev
 
     def _llm_fingerprint(self) -> Dict[str, Any]:
-        """A best-effort, stable fingerprint of params that affect generation."""
+        """Best-effort fingerprint of params that affect generation."""
         fields = [
             "model",
             "model_name",
             "temperature",
             "top_p",
             "max_tokens",
+            "max_completion_tokens",
             "presence_penalty",
             "frequency_penalty",
             "seed",
@@ -121,41 +119,46 @@ class CachedQueuedChatOpenAI(ChatOpenAI):
         ]
         fp: Dict[str, Any] = {}
         for name in fields:
-            if hasattr(self, name):
-                val = getattr(self, name)
+            if hasattr(self._model, name):
+                val = getattr(self._model, name)
                 if val is not None:
                     fp[name] = val
-        # model_kwargs can affect results (logit_bias, etc.)
-        if hasattr(self, "model_kwargs"):
-            mk = getattr(self, "model_kwargs")
+
+        # model_kwargs can affect results (logit_bias, response_format, etc.)
+        if hasattr(self._model, "model_kwargs"):
+            mk = getattr(self._model, "model_kwargs")
             if mk:
                 fp["model_kwargs"] = mk
         return fp
 
-    def _make_key(self, method: str, args: tuple, kwargs: dict) -> str:
+    def _make_key(self, method: str, *, input_key: Any, kwargs_key: dict[str, Any]) -> str:
+        # Keep the historical namespace to avoid needless cache busting when upgrading.
         return make_key(
             namespace="langchain.chatopenai",
             data={
                 "method": method,
-                "args": args,
-                "kwargs": kwargs,
+                "input": input_key,
+                "kwargs": kwargs_key,
                 "llm": self._llm_fingerprint(),
             },
         )
 
-    def _get_cached(self, key: str):
+    def _cache_get(self, key: str) -> Any | None:
         return self._cache.get(key)
 
-    def _set_cached(self, key: str, value: Any):
+    def _cache_set(self, key: str, value: Any) -> None:
         self._cache.set(key, value)
 
-    def _normalize_messages(self, messages: List[Any]) -> List[BaseMessage]:
-        norm: List[BaseMessage] = []
+    def _normalize_messages(self, messages: Iterable[Any]) -> list[BaseMessage]:
+        norm: list[BaseMessage] = []
         for m in messages:
             if isinstance(m, BaseMessage):
                 norm.append(m)
-            elif isinstance(m, dict):
-                t = m.get("type")
+                continue
+
+            if isinstance(m, dict):
+                # Support both LC-style {type, content} and OpenAI-style {role, content}
+                t = m.get("type") or m.get("role")
                 c = m.get("content", "")
                 if t == "system":
                     norm.append(SystemMessage(content=c))
@@ -164,200 +167,130 @@ class CachedQueuedChatOpenAI(ChatOpenAI):
                 elif t in ("assistant", "ai"):
                     norm.append(AIMessage(content=c))
                 else:
-                    raise ValueError(f"Unknown message type: {t}")
-            else:
-                raise ValueError(f"Unsupported message element: {m!r}")
+                    raise ValueError(f"Unknown message type/role: {t!r}")
+                continue
+
+            raise ValueError(f"Unsupported message element: {m!r}")
         return norm
 
     @staticmethod
-    def _message_dump(message: BaseMessage) -> Dict[str, Any]:
-        """Return a stable dictionary representation of a message."""
+    def _message_dump(message: BaseMessage) -> dict[str, Any]:
         if hasattr(message, "model_dump"):
-            return message.model_dump()
+            return message.model_dump()  # type: ignore[no-any-return]
         if hasattr(message, "dict"):
             return message.dict()  # pyright: ignore[reportDeprecated]
-        if hasattr(message, "__dict__"):
-            return dict(message.__dict__)
-        raise TypeError(f"Unsupported message type for dumping: {type(message)!r}")
+        return dict(getattr(message, "__dict__", {}))
 
     async def _run_queued(self, key: str, coro_factory):
-        """In-flight dedup + concurrency limiting wrapper for async calls."""
         existing = self._inflight.get(key)
-        if existing:
+        if existing is not None:
             return await existing
+
         loop = asyncio.get_running_loop()
-        fut: asyncio.Future = loop.create_future()
+        fut: asyncio.Future[Any] = loop.create_future()
         self._inflight[key] = fut
         try:
             async with self._sem:
                 result = await coro_factory()
                 fut.set_result(result)
                 return result
-        except Exception as e:
-            fut.set_exception(e)
+        except Exception as exc:  # noqa: BLE001
+            fut.set_exception(exc)
             raise
         finally:
             self._inflight.pop(key, None)
 
-    # -------------- async public API --------------
+    # ------------------------------------------------------------------
+    # public async API
+    # ------------------------------------------------------------------
 
-    async def apredict( # pyright: ignore[reportIncompatibleMethodOverride]
+    async def ainvoke(
         self,
-        prompt: str,
-        stop: Optional[str] = None,
-        sender: Optional[str] = None,
-    ) -> str:  
-        method = "apredict"
-        key = self._make_key(method, (prompt,), {"stop": stop, "sender": sender})
-        if self.cache_enabled:
-            cached = self._get_cached(key)
-            if cached is not None:
-                logger.info(f"[CACHE HIT] apredict, key = {key}")
-                return cached
-        logger.info(f"[CACHE MISS] apredict, key = {key}")
-        async def _call():
-            parent = cast(Any, super(CachedQueuedChatOpenAI, self))
-            return await parent.apredict(prompt, stop=stop)
-        out = await self._run_queued(key, _call)
-        if self.cache_enabled:
-            self._set_cached(key, out)
-        return out
-
-    async def acomplete( # pyright: ignore[reportIncompatibleMethodOverride]
-        self,
-        prompt: str,
-        stop: Optional[str] = None,
-        sender: Optional[str] = None,
-    ) -> LLMResult:  
-        method = "acomplete"
-        key = self._make_key(method, (prompt,), {"stop": stop, "sender": sender})
-        if self.cache_enabled:
-            cached = self._get_cached(key)
-            if cached is not None:
-                logger.info(f"[CACHE HIT] acomplete, key = {key}")
-                return cached
-        logger.info(f"[CACHE MISS] acomplete, key = {key}")
-        async def _call():
-            parent = cast(Any, super(CachedQueuedChatOpenAI, self))
-            return await parent.acomplete(prompt, stop=stop)
-        out = await self._run_queued(key, _call)
-        if self.cache_enabled:
-            self._set_cached(key, out)
-        return out
-
-    async def abatch( # pyright: ignore[reportIncompatibleMethodOverride]
-        self,
-        prompts: List[str],
-        stop: Optional[str] = None,
-        sender: Optional[str] = None,
-    ) -> LLMResult:  
-        method = "abatch"
-        key = self._make_key(method, (tuple(prompts),), {"stop": stop, "sender": sender})
-        if self.cache_enabled:
-            cached = self._get_cached(key)
-            if cached is not None:
-                logger.info(f"[CACHE HIT] abatch, key = {key}")
-                return cached
-        logger.info(f"[CACHE MISS] abatch, key = {key}")
-        async def _call():
-            parent = cast(Any, super(CachedQueuedChatOpenAI, self))
-            # LangChain's type stubs may define a more generic input type.
-            return await parent.abatch(cast(Any, prompts), stop=stop)
-        out = await self._run_queued(key, _call)
-        if self.cache_enabled:
-            self._set_cached(key, out)
-        return out
-
-    async def agenerate( # pyright: ignore[reportIncompatibleMethodOverride]
-        self,
-        messages: List[Union[BaseMessage, dict]],
-        stop: Optional[List[str]] = None,
-        callbacks: Optional[List[Any]] = None,
-        tags: Optional[List[str]] = None,
-        metadata: Optional[Dict[str, Any]] = None,
-        run_manager: Any = None,
-        sender: Optional[str] = None,
-    ) -> ChatResult:  
-        method = "agenerate"
-        msgs = self._normalize_messages(messages)
-        msgs = [msgs]
-        key = self._make_key(
-            method,
-            (tuple(self._message_dump(m) for m in msgs[0]),),
-            {"stop": stop, "sender": sender},
-        )
-        if self.cache_enabled:
-            cached = self._get_cached(key)
-            if cached is not None:
-                logger.info(f"[CACHE HIT] agenerate, key = {key}")
-                return cached
-        logger.info(f"[CACHE MISS] agenerate, key = {key}")
-        async def _call():
-            parent = cast(Any, super(CachedQueuedChatOpenAI, self))
-            return await parent.agenerate(
-                messages=cast(Any, msgs),
-                stop=stop,
-                callbacks=callbacks,
-                tags=tags,
-                metadata=metadata,
-                # run_manager опускаем — в текущей версии LC его уже прокидывают внутри
-            )
-        out = await self._run_queued(key, _call)
-        if self.cache_enabled:
-            self._set_cached(key, out)
-        return out
-
-    async def ainvoke( # pyright: ignore[reportIncompatibleMethodOverride]
-        self,
-        input: Optional[Union[PromptValue, str]] = None,
-        /,
+        input: WrapperInput,  # noqa: A002
+        config: Any = None,
         *,
-        messages: Optional[List[Union[BaseMessage, dict]]] = None,
-        stop: Optional[List[str]] = None,
-        callbacks: Optional[List[Any]] = None,
-        tags: Optional[List[str]] = None,
-        metadata: Optional[Dict[str, Any]] = None,
-        run_manager: Any = None,
-        sender: Optional[str] = None,
-    ) -> ChatResult:  
-        method = "ainvoke"
-        key_args: tuple[Any, ...]
-        if messages is not None:
-            msgs = self._normalize_messages(messages)
-            key_args = (tuple(self._message_dump(m) for m in msgs),)
+        stop: list[str] | None = None,
+        sender: str | None = None,
+        **kwargs: Any,
+    ) -> BaseMessage:
+        """Invoke the underlying model using only the public Runnable API.
+
+        - If `input` is a list of dict messages, it is normalized into `list[BaseMessage]`.
+        - Cache key includes: input + stop + kwargs + model fingerprint.
+        - `config` is forwarded to the underlying model but NOT included in cache key.
+        """
+
+        # Normalize messages if needed.
+        lc_input: LanguageModelInput
+        input_key: Any
+        if isinstance(input, list):
+            # `input` can be list[BaseMessage] or list[dict].
+            msgs = self._normalize_messages(input)
+            lc_input = msgs
+            input_key = tuple(self._message_dump(m) for m in msgs)
         else:
-            key_args = (input,)
-        key = self._make_key(method, key_args, {"stop": stop, "sender": sender})
+            lc_input = cast(LanguageModelInput, input)
+            input_key = input
+
+        # Include stop/sender/kwargs in key. `sender` is internal and does not affect output.
+        kwargs_key = {"stop": stop, **kwargs}
+        key = self._make_key("ainvoke", input_key=input_key, kwargs_key=kwargs_key)
 
         if self.cache_enabled:
-            cached = self._get_cached(key)
+            cached = self._cache_get(key)
             if cached is not None:
-                logger.info(f"[CACHE HIT] ainvoke, key = {key}")
-                return cached
-        logger.info(f"[CACHE MISS] ainvoke, key = {key}")
-        async def _call():
-            parent = cast(Any, super(CachedQueuedChatOpenAI, self))
-            return await parent.ainvoke(
-                cast(Any, input),
-                messages=cast(Any, messages),
-                stop=stop,
-                callbacks=callbacks,
-                tags=tags,
-                metadata=metadata,
-            )
+                logger.info("[CACHE HIT] ainvoke, key = %s", key)
+                return cast(BaseMessage, cached)
+        logger.info("[CACHE MISS] ainvoke, key = %s", key)
+
+        async def _call() -> BaseMessage:
+            if stop is None:
+                return await self._model.ainvoke(lc_input, config=config, **kwargs)
+            return await self._model.ainvoke(lc_input, config=config, stop=stop, **kwargs)
+
         out = await self._run_queued(key, _call)
         if self.cache_enabled:
-            self._set_cached(key, out)
+            self._cache_set(key, out)
         return out
 
-    # -------------- disable sync API --------------
-    def _no_sync_guard(self, *args, **kwargs):
-        raise RuntimeError("Sync методы отключены. Используйте a*-версии (async).")
+    async def apredict(
+        self,
+        prompt: str,
+        stop: str | None = None,
+        sender: str | None = None,
+        **kwargs: Any,
+    ) -> str:
+        """Compatibility facade returning text.
 
-    # Disable sync methods explicitly
+        Implemented via `ainvoke` to avoid relying on provider-specific helpers.
+        """
+
+        stop_list = [stop] if stop else None
+        msg = await self.ainvoke(prompt, stop=stop_list, sender=sender, **kwargs)
+        return cast(Any, getattr(msg, "content", None)) or str(msg)
+
+    # ------------------------------------------------------------------
+    # prevent accidental sync usage
+    # ------------------------------------------------------------------
+
+    def _no_sync_guard(self, *args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("Sync методы отключены. Используйте async API.")
+
     predict = _no_sync_guard
     complete = _no_sync_guard
     batch = _no_sync_guard
     generate = _no_sync_guard
     invoke = _no_sync_guard
     stream = _no_sync_guard
+
+    def __getattr__(self, name: str) -> Any:
+        if name in {"predict", "complete", "batch", "generate", "invoke", "stream"}:
+            return self._no_sync_guard
+
+        # Explicitly block provider helper methods that would bypass caching
+        # and concurrency control if called on the underlying model.
+        if name in {"agenerate", "acomplete", "abatch"}:
+            raise AttributeError(
+                f"{name} is not exposed by this wrapper. Use `ainvoke`/`apredict` instead."
+            )
+        return getattr(self._model, name)

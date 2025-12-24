@@ -12,6 +12,7 @@ async def test_wrapper_apredict_uses_cache(tmp_path, monkeypatch, caplog):
     pytest.importorskip("langchain_core")
 
     from langchain_openai import ChatOpenAI
+    from langchain_core.messages import AIMessage
 
     from llm.services.cache import SQLiteCache
     from llm.services.wrapper import CachedQueuedChatOpenAI
@@ -20,27 +21,30 @@ async def test_wrapper_apredict_uses_cache(tmp_path, monkeypatch, caplog):
 
     calls = {"n": 0}
 
-    async def fake_apredict(self, prompt: str, stop=None):
+    async def fake_ainvoke(self, input, config=None, **kwargs):
         calls["n"] += 1
-        return f"OUT:{prompt}:{stop}"
+        return AIMessage(content=f"OUT:{input}:{kwargs.get('stop')}")
 
-    monkeypatch.setattr(ChatOpenAI, "apredict", fake_apredict, raising=True)
+    monkeypatch.setattr(ChatOpenAI, "ainvoke", fake_ainvoke, raising=True)
 
     cache = SQLiteCache(path=str(tmp_path / "cache.sqlite"), ttl_seconds=0, enabled=True)
 
-    llm = CachedQueuedChatOpenAI(
+    model = ChatOpenAI(
         api_key="test",
         base_url="http://example",
-        model_name="gpt-test",
         model="gpt-test",
         temperature=0.0,
         verbose=False,
         max_tokens=16,
+    )
+
+    llm = CachedQueuedChatOpenAI(
+        model=model,
         cache_enabled=True,
         cache_path=cache.path,
         cache_ttl=0,
         max_concurrent=5,
-        cache=cache,
+        bp_cache=cache,
     )
 
     out1 = await llm.apredict("hi")
@@ -50,8 +54,8 @@ async def test_wrapper_apredict_uses_cache(tmp_path, monkeypatch, caplog):
     assert calls["n"] == 1
 
     logs = "\n".join(rec.getMessage() for rec in caplog.records)
-    assert "[CACHE MISS] apredict" in logs
-    assert "[CACHE HIT] apredict" in logs
+    assert "[CACHE MISS] ainvoke" in logs
+    assert "[CACHE HIT] ainvoke" in logs
     assert "key =" in logs
 
 
@@ -61,48 +65,55 @@ async def test_wrapper_cache_key_includes_llm_params(tmp_path, monkeypatch):
     pytest.importorskip("langchain_core")
 
     from langchain_openai import ChatOpenAI
+    from langchain_core.messages import AIMessage
 
     from llm.services.cache import SQLiteCache
     from llm.services.wrapper import CachedQueuedChatOpenAI
 
     calls = {"n": 0}
 
-    async def fake_apredict(self, prompt: str, stop=None):
+    async def fake_ainvoke(self, input, config=None, **kwargs):
         calls["n"] += 1
-        return f"OUT:{prompt}:{stop}"
+        return AIMessage(content=f"OUT:{input}:{kwargs.get('stop')}")
 
-    monkeypatch.setattr(ChatOpenAI, "apredict", fake_apredict, raising=True)
+    monkeypatch.setattr(ChatOpenAI, "ainvoke", fake_ainvoke, raising=True)
 
     cache = SQLiteCache(path=str(tmp_path / "cache.sqlite"), ttl_seconds=0, enabled=True)
 
-    llm1 = CachedQueuedChatOpenAI(
+    model1 = ChatOpenAI(
         api_key="test",
         base_url="http://example",
-        model_name="gpt-test",
         model="gpt-test",
         temperature=0.1,
         verbose=False,
         max_tokens=16,
+    )
+
+    llm1 = CachedQueuedChatOpenAI(
+        model=model1,
         cache_enabled=True,
         cache_path=cache.path,
         cache_ttl=0,
         max_concurrent=5,
-        cache=cache,
+        bp_cache=cache,
     )
 
-    llm2 = CachedQueuedChatOpenAI(
+    model2 = ChatOpenAI(
         api_key="test",
         base_url="http://example",
-        model_name="gpt-test",
         model="gpt-test",
         temperature=0.9,
         verbose=False,
         max_tokens=16,
+    )
+
+    llm2 = CachedQueuedChatOpenAI(
+        model=model2,
         cache_enabled=True,
         cache_path=cache.path,
         cache_ttl=0,
         max_concurrent=5,
-        cache=cache,
+        bp_cache=cache,
     )
 
     await llm1.apredict("hi")
