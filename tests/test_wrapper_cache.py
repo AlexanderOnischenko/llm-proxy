@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 
 import pytest
+from pydantic import SecretStr
 
 
 @pytest.mark.asyncio
@@ -30,12 +31,12 @@ async def test_wrapper_apredict_uses_cache(tmp_path, monkeypatch, caplog):
     cache = SQLiteCache(path=str(tmp_path / "cache.sqlite"), ttl_seconds=0, enabled=True)
 
     model = ChatOpenAI(
-        api_key="test",
+        api_key=SecretStr("test"),
         base_url="http://example",
         model="gpt-test",
         temperature=0.0,
         verbose=False,
-        max_tokens=16,
+        max_completion_tokens=16,
     )
 
     llm = CachedQueuedChatOpenAI(
@@ -81,12 +82,12 @@ async def test_wrapper_cache_key_includes_llm_params(tmp_path, monkeypatch):
     cache = SQLiteCache(path=str(tmp_path / "cache.sqlite"), ttl_seconds=0, enabled=True)
 
     model1 = ChatOpenAI(
-        api_key="test",
+        api_key=SecretStr("test"),
         base_url="http://example",
         model="gpt-test",
         temperature=0.1,
         verbose=False,
-        max_tokens=16,
+        max_completion_tokens=16,
     )
 
     llm1 = CachedQueuedChatOpenAI(
@@ -99,12 +100,12 @@ async def test_wrapper_cache_key_includes_llm_params(tmp_path, monkeypatch):
     )
 
     model2 = ChatOpenAI(
-        api_key="test",
+        api_key=SecretStr("test"),
         base_url="http://example",
         model="gpt-test",
         temperature=0.9,
         verbose=False,
-        max_tokens=16,
+        max_completion_tokens=16,
     )
 
     llm2 = CachedQueuedChatOpenAI(
