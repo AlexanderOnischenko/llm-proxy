@@ -25,12 +25,12 @@ def test_deps_pass_same_cache_to_llm_and_provider(tmp_path, monkeypatch):
 
     captured: dict[str, Any] = {}
 
-    # Patch constructors/factories to capture injected cache.
-    def fake_create_custom_llm(settings, cache=None, **kwargs):
+    # Patch constructors/factories to capture the injected cache.
+    def fake_create_custom_llm(settings, cache=None, **kwargs):  # noqa: ANN001
         captured["llm_cache"] = cache
         return object()
 
-    def fake_make_chat_provider(settings, *, cache=None, **kwargs):
+    def fake_make_chat_provider(settings, *, cache=None, **kwargs):  # noqa: ANN001
         captured["provider_cache"] = cache
 
         class DummyProvider:

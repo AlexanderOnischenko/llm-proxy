@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
+from pydantic import SecretStr
+
 from llm.config.settings import Settings
 from llm.services.cache import SQLiteCache
 from llm.services.wrapper import CachedQueuedChatOpenAI
@@ -23,15 +25,21 @@ def create_custom_llm(
     """
     priority_total_slots = max(settings.llm_priority_total_slots, 1)
 
+    # langchain-openai types `api_key` as SecretStr | None.
+    api_key = SecretStr(settings.llm_api_key) if settings.llm_api_key else None
+
+    # langchain-openai's type stubs don't always expose `max_tokens` as a top-level
+    # kwarg. Passing it via model_kwargs keeps both runtime behavior and static typing.
+    model_kwargs: Dict[str, Any] = {"max_tokens": settings.llm_max_tokens}
+
     model_params: Dict[str, Any] = {
         "base_url": str(settings.llm_api_base),
         # LangChain OpenAI integration uses `model` as the canonical name.
         "model": settings.llm_model_name,
         "temperature": settings.llm_temperature,
-        "api_key": settings.llm_api_key,
+        "api_key": api_key,
         "verbose": settings.llm_verbose,
-        # Keep backwards compatible name; some model families prefer `max_completion_tokens`.
-        "max_tokens": settings.llm_max_tokens,
+        "model_kwargs": model_kwargs,
     }
     wrapper_params: Dict[str, Any] = {
         "cache_enabled": settings.llm_cache_enabled,
@@ -52,6 +60,11 @@ def create_custom_llm(
     for key in list(override_kwargs.keys()):
         if key in wrapper_override_keys:
             wrapper_params[key] = override_kwargs.pop(key)
+
+    # Allow callers to override legacy `max_tokens` without passing it as a top-level kwarg.
+    if "max_tokens" in override_kwargs:
+        model_params.setdefault("model_kwargs", {})
+        model_params["model_kwargs"]["max_tokens"] = override_kwargs.pop("max_tokens")
 
     model_params.update(override_kwargs)
 

@@ -7,10 +7,15 @@ import pytest
 
 from llm.models.chat import ChatCompletionRequest, ChatMessage
 from llm.services.cache import SQLiteCache
-from llm.services.chat_provider import OpenAIChatProvider
+from llm.services.chat_provider import OpenAIChatProvider, make_chat_provider
 
 
 class DummySettings:
+    llm_cert_file: str | None = None
+    llm_key_file: str | None = None
+    llm_ca_bundle_file: str | None = None
+    llm_verify_ssl: bool = True
+    
     def __init__(self, *, cache_path: str):
         self.llm_api_key = "test"
         self.llm_api_base = "http://example"
@@ -21,6 +26,15 @@ class DummySettings:
         self.llm_cache_ttl = 0
         self.llm_cache_enabled = True
         self.llm_cache_path_resolved = cache_path
+
+        # Provider selection (default)
+        self.llm_provider = "openai"
+
+        # TLS/mTLS options (default off)
+        self.llm_verify_ssl = True
+        self.llm_ca_bundle_file = None
+        self.llm_cert_file = None
+        self.llm_key_file = None
 
 
 class _Resp:
@@ -99,3 +113,63 @@ async def test_chat_provider_cache_key_changes_when_params_change(tmp_path, monk
 
     # Different temperature => different cache key => two provider calls
     assert calls["n"] == 2
+
+
+def test_make_chat_provider_selects_gigachat_when_requested(tmp_path, monkeypatch):
+    pytest.importorskip("langchain_gigachat")
+
+    import langchain_gigachat
+    from llm.services.chat_provider import GigaChatProvider
+
+    class DummyGigaChat:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:  # noqa: ANN401
+            return None
+
+        async def achat(self, payload: dict[str, Any]) -> dict[str, Any]:
+            return {"ok": True, "payload": payload}
+
+        async def aclose(self) -> None:
+            return None
+
+    monkeypatch.setattr(langchain_gigachat, "GigaChat", DummyGigaChat)
+
+    settings = DummySettings(cache_path=str(tmp_path / "cache.sqlite"))
+    settings.llm_provider = "gigachat"
+
+    provider = make_chat_provider(cast(Any, settings), cache=None)
+    assert isinstance(provider, GigaChatProvider)
+
+
+@pytest.mark.parametrize(
+    "verify_ssl, ca_bundle, expected_verify",
+    [
+        (True, "/tmp/ca.pem", "/tmp/ca.pem"),
+        (False, None, False),
+    ],
+)
+def test_openai_provider_mtls_wiring(monkeypatch, tmp_path, verify_ssl, ca_bundle, expected_verify):
+    """Ensure we pass cert/key and verify settings into the injected httpx client."""
+
+    captured: dict[str, Any] = {}
+
+    class DummyAsyncClient:
+        def __init__(self, *args: Any, **kwargs: Any):
+            captured.update(kwargs)
+
+        async def aclose(self) -> None:
+            return None
+
+    import llm.services.chat_provider as chat_provider
+
+    monkeypatch.setattr(chat_provider.httpx, "AsyncClient", DummyAsyncClient)
+
+    settings = DummySettings(cache_path=str(tmp_path / "cache.sqlite"))
+    settings.llm_cert_file = "/tmp/cert.pem"
+    settings.llm_key_file = "/tmp/key.pem"
+    settings.llm_ca_bundle_file = ca_bundle
+    settings.llm_verify_ssl = verify_ssl
+
+    provider = OpenAIChatProvider(cast(Any, settings), cache=None)
+    assert provider._http_client is not None
+    assert captured["cert"] == ("/tmp/cert.pem", "/tmp/key.pem")
+    assert captured["verify"] == expected_verify

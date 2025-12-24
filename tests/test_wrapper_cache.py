@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 
 import pytest
-from pydantic import SecretStr
 
 
 @pytest.mark.asyncio
@@ -14,6 +13,7 @@ async def test_wrapper_apredict_uses_cache(tmp_path, monkeypatch, caplog):
 
     from langchain_openai import ChatOpenAI
     from langchain_core.messages import AIMessage
+    from pydantic import SecretStr
 
     from llm.services.cache import SQLiteCache
     from llm.services.wrapper import CachedQueuedChatOpenAI
@@ -36,7 +36,7 @@ async def test_wrapper_apredict_uses_cache(tmp_path, monkeypatch, caplog):
         model="gpt-test",
         temperature=0.0,
         verbose=False,
-        max_completion_tokens=16,
+        model_kwargs={"max_tokens": 16},
     )
 
     llm = CachedQueuedChatOpenAI(
@@ -67,6 +67,7 @@ async def test_wrapper_cache_key_includes_llm_params(tmp_path, monkeypatch):
 
     from langchain_openai import ChatOpenAI
     from langchain_core.messages import AIMessage
+    from pydantic import SecretStr
 
     from llm.services.cache import SQLiteCache
     from llm.services.wrapper import CachedQueuedChatOpenAI
@@ -87,7 +88,7 @@ async def test_wrapper_cache_key_includes_llm_params(tmp_path, monkeypatch):
         model="gpt-test",
         temperature=0.1,
         verbose=False,
-        max_completion_tokens=16,
+        model_kwargs={"max_tokens": 16},
     )
 
     llm1 = CachedQueuedChatOpenAI(
@@ -105,7 +106,7 @@ async def test_wrapper_cache_key_includes_llm_params(tmp_path, monkeypatch):
         model="gpt-test",
         temperature=0.9,
         verbose=False,
-        max_completion_tokens=16,
+        model_kwargs={"max_tokens": 16},
     )
 
     llm2 = CachedQueuedChatOpenAI(

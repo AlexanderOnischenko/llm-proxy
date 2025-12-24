@@ -3,19 +3,17 @@ from __future__ import annotations
 
 import inspect
 import json
+import logging
 
 from typing import Any, Protocol
 
 import httpx
 from openai import AsyncOpenAI, OpenAIError
-from langchain_gigachat import GigaChat
 
 from llm.config.settings import Settings as llm_Settnigs
 from llm.models.chat import ChatCompletionRequest
 from llm.services.cache import SQLiteCache, make_key
-from shared_pkg.utils.logging_config import get_logger
-
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 class ChatProvider(Protocol):
     async def complete(self, request: ChatCompletionRequest) -> dict[str, Any]:
@@ -181,6 +179,14 @@ class GigaChatProvider:
     def __init__(self, settings: llm_Settnigs, *, cache: SQLiteCache | None = None):
         self._base_url = str(settings.llm_api_base)
         self._default_model = settings.llm_model_name
+
+        # Local import: allow the rest of the project to work without gigachat extras.
+        try:
+            from langchain_gigachat import GigaChat  # type: ignore
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(
+                "langchain_gigachat is required when LLM_PROVIDER=gigachat"
+            ) from exc
 
         # NOTE: Settings names mirror gigachat SDK options.
         self._client = GigaChat(

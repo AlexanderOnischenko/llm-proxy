@@ -6,6 +6,10 @@ import sys
 import types
 from typing import Any, cast
 
+from collections.abc import Generator
+import pytest
+
+from llm.config.settings import reset_settings_overrides
 
 
 def _ensure_package(name: str) -> types.ModuleType:
@@ -33,9 +37,25 @@ def _install_shared_pkg_aliases_if_missing() -> None:
     _ensure_package("shared_pkg.config")
     _ensure_package("shared_pkg.utils")
 
-    # These should exist in src/llm after your refactor
     llm_settings = importlib.import_module("llm.config.settings")
-    llm_logging = importlib.import_module("llm.utils.logging_config")
+
+    # Logging: prefer project-local module if present; otherwise provide a tiny stub
+    # that matches the legacy interface (get_logger/configure_logging).
+    try:
+        llm_logging = importlib.import_module("llm.utils.logging_config")
+    except Exception:
+        llm_logging = types.ModuleType("llm.utils.logging_config")
+
+        import logging
+
+        def get_logger(name: str):
+            return logging.getLogger(name)
+
+        def configure_logging(*args: Any, **kwargs: Any) -> None:
+            return None
+
+        llm_logging.get_logger = get_logger  # type: ignore[attr-defined]
+        llm_logging.configure_logging = configure_logging  # type: ignore[attr-defined]
 
     sys.modules["shared_pkg.config.settings"] = llm_settings
     sys.modules["shared_pkg.utils.logging_config"] = llm_logging
@@ -75,3 +95,10 @@ def _install_openai_stub_if_needed() -> None:
 
 _install_shared_pkg_aliases_if_missing()
 _install_openai_stub_if_needed()
+
+
+@pytest.fixture(autouse=True)
+def _reset_settings_overrides() -> Generator[None, None, None]:
+    reset_settings_overrides()
+    yield
+    reset_settings_overrides()

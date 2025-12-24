@@ -1,6 +1,10 @@
 # llm/deps.py
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Awaitable
+from typing import Any
+
 from fastapi import Depends
 
 from llm.config.settings import Settings, get_settings
@@ -14,6 +18,16 @@ _chat_provider: ChatProvider | None = None
 _chat_queue: PriorityChatQueue | None = None
 _shared_cache: SQLiteCache | None = None
 
+async def _await_it(aw: Awaitable[Any]) -> None:
+    await aw
+
+def _schedule_awaitable(aw: Awaitable[Any]) -> None:
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.run(_await_it(aw))
+    else:
+        loop.create_task(_await_it(aw))
 
 def build_cache(settings: Settings) -> SQLiteCache:
     """Internal singleton builder for shared SQLite cache."""
@@ -77,9 +91,20 @@ def get_chat_queue(
 
 def reset_chat_dependencies() -> None:
     global _chat_queue, _chat_provider, _llm_instance, _shared_cache
+
+    provider = _chat_provider
+    cache = _shared_cache
+
     _chat_queue = None
     _chat_provider = None
     _llm_instance = None
-    if _shared_cache is not None:
-        _shared_cache.close()
     _shared_cache = None
+
+    if provider is not None:
+        _schedule_awaitable(provider.aclose())
+
+    if cache is not None:
+        try:
+            cache.close()
+        except Exception:
+            pass
