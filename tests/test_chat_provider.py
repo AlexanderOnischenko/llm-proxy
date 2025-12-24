@@ -120,6 +120,7 @@ def test_make_chat_provider_selects_gigachat_when_requested(tmp_path, monkeypatc
 
     import gigachat
 
+    import llm.services.chat_provider as llm_provider
     from llm.services.chat_provider import GigaChatProvider
 
     class DummyGigaChat:
@@ -133,6 +134,7 @@ def test_make_chat_provider_selects_gigachat_when_requested(tmp_path, monkeypatc
             return None
 
     monkeypatch.setattr(gigachat, "GigaChat", DummyGigaChat)
+    monkeypatch.setattr(llm_provider, "_build_mtls_ssl_context", lambda settings: object())
 
     settings = DummySettings(cache_path=str(tmp_path / "cache.sqlite"))
     settings.llm_provider = "gigachat"

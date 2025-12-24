@@ -4,7 +4,8 @@ from __future__ import annotations
 import inspect
 import json
 import logging
-
+from pathlib import Path
+import ssl
 from typing import Any, Protocol
 
 import httpx
@@ -13,6 +14,7 @@ from openai import AsyncOpenAI, OpenAIError
 from llm.config.settings import Settings as llm_Settnigs
 from llm.models.chat import ChatCompletionRequest
 from llm.services.cache import SQLiteCache, make_key
+
 logger = logging.getLogger(__name__)
 
 class ChatProvider(Protocol):
@@ -77,6 +79,31 @@ def _build_httpx_client(settings: llm_Settnigs) -> httpx.AsyncClient:
 
     return httpx.AsyncClient(timeout=timeout, verify=verify, cert=cert)
 
+def _build_mtls_ssl_context(settings) -> ssl.SSLContext:
+    cert = getattr(settings, "llm_cert_file", None)
+    key = getattr(settings, "llm_key_file", None)
+
+    if not cert or not key:
+        raise ValueError("GigaChat mTLS requires both LLM_CERT_FILE and LLM_KEY_FILE")
+
+    cert_path = Path(cert)
+    key_path = Path(key)
+
+    if not cert_path.is_file():
+        raise FileNotFoundError(f"LLM_CERT_FILE not found: {cert_path}")
+    if not key_path.is_file():
+        raise FileNotFoundError(f"LLM_KEY_FILE not found: {key_path}")
+
+    cafile = getattr(settings, "llm_ca_bundle_file", None) or None
+    ctx = ssl.create_default_context(cafile=cafile)
+
+    password = getattr(settings, "llm_key_file_password", None)
+    if password:
+        ctx.load_cert_chain(certfile=str(cert_path), keyfile=str(key_path), password=password)
+    else:
+        ctx.load_cert_chain(certfile=str(cert_path), keyfile=str(key_path))
+
+    return ctx
 
 class OpenAIChatProvider:
     """OpenAI-compatible provider using the official OpenAI SDK.
@@ -195,19 +222,18 @@ class GigaChatProvider:
                 "gigachat is required when LLM_PROVIDER=gigachat"
             ) from exc
 
-        # NOTE: Settings names mirror gigachat SDK options.
+        ctx = _build_mtls_ssl_context(settings)
+
         self._client = GigaChat(
-            credentials=settings.llm_api_key,
             model=settings.llm_model_name,
             base_url=str(settings.llm_api_base),
-            auth_url=getattr(settings, "llm_auth_url", None),
-            scope=getattr(settings, "llm_scope", None),
             timeout=float(getattr(settings, "llm_timeout", 300.0) or 300.0),
-            verify_ssl_certs=bool(getattr(settings, "llm_verify_ssl", True)),
-            ca_bundle_file=getattr(settings, "llm_ca_bundle_file", None),
-            cert_file=getattr(settings, "llm_cert_file", None),
-            key_file=getattr(settings, "llm_key_file", None),
-            key_file_password=getattr(settings, "llm_key_file_password", None),
+            verify_ssl_certs=True,
+            ssl_context=ctx,
+            # ВАЖНО: чтобы не попасть в verify=str/cert=... ветку внутри httpx — лучше не передавать:
+            ca_bundle_file=None,
+            cert_file=None,
+            key_file=None,
         )
 
         if cache is not None:
