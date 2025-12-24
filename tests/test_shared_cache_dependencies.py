@@ -23,19 +23,27 @@ def test_deps_build_cache_singleton(tmp_path):
 def test_deps_pass_same_cache_to_llm_and_provider(tmp_path, monkeypatch):
     import llm.deps as llm_deps
 
-    captured = {}
+    captured: dict[str, Any] = {}
 
-    # Patch constructors to capture the injected cache.
+    # Patch constructors/factories to capture injected cache.
     def fake_create_custom_llm(settings, cache=None, **kwargs):
         captured["llm_cache"] = cache
         return object()
 
-    class FakeProvider:
-        def __init__(self, settings, *, cache=None):
-            captured["provider_cache"] = cache
+    def fake_make_chat_provider(settings, *, cache=None, **kwargs):
+        captured["provider_cache"] = cache
+
+        class DummyProvider:
+            async def complete(self, request):  # noqa: ANN001
+                return {}
+
+            async def aclose(self) -> None:
+                return None
+
+        return DummyProvider()
 
     monkeypatch.setattr(llm_deps, "create_custom_llm", fake_create_custom_llm)
-    monkeypatch.setattr(llm_deps, "OpenAIChatProvider", FakeProvider)
+    monkeypatch.setattr(llm_deps, "make_chat_provider", fake_make_chat_provider)
 
     settings = SimpleNamespace(
         # Cache settings used by build_cache

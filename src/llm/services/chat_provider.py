@@ -1,19 +1,65 @@
 # llm/services/chat_provider.py
 from __future__ import annotations
 
-from typing import Any
+import inspect
+import json
+from typing import Any, Protocol, runtime_checkable
 
 from openai import AsyncOpenAI, OpenAIError
-from llm.config.settings import Settings
-from shared_pkg.utils.logging_config import get_logger
+
+from llm.config.settings import Settings as llm_Settnigs
 from llm.models.chat import ChatCompletionRequest
 from llm.services.cache import SQLiteCache, make_key
+from shared_pkg.utils.logging_config import get_logger
 
 logger = get_logger(__name__)
 
 
+def _as_jsonable_content(content: Any) -> str:
+    """GigaChat expects message.content to be a string.
+
+    Our public schema allows str | list[str|dict]. For non-str, we serialize.
+    """
+    if isinstance(content, str):
+        return content
+    try:
+        return json.dumps(content, ensure_ascii=False)
+    except Exception:  # noqa: BLE001
+        return str(content)
+
+
+def _dump_obj(obj: Any) -> Any:
+    """Best-effort conversion to dict for SDK responses."""
+    if isinstance(obj, dict):
+        return obj
+    if hasattr(obj, "model_dump"):
+        return obj.model_dump()  # type: ignore[no-any-return]
+    if hasattr(obj, "dict"):
+        return obj.dict()  # type: ignore[no-any-return]
+    if hasattr(obj, "json"):
+        try:
+            return json.loads(obj.json())
+        except Exception:  # noqa: BLE001
+            pass
+    return obj
+
+
+@runtime_checkable
+class ChatProvider(Protocol):
+    """Typed interface for chat providers used by /v1/chat.
+
+    Keep this minimal and stable; providers may be backed by different SDKs.
+    """
+
+    async def complete(self, request: ChatCompletionRequest) -> dict[str, Any]:
+        ...
+
+    async def aclose(self) -> None:
+        ...
+
+
 class OpenAIChatProvider:
-    def __init__(self, settings: Settings, *, cache: SQLiteCache | None = None):
+    def __init__(self, settings: llm_Settnigs, *, cache: SQLiteCache | None = None):
         self._client = AsyncOpenAI(
             api_key=settings.llm_api_key,
             base_url=str(settings.llm_api_base),
@@ -72,3 +118,127 @@ class OpenAIChatProvider:
 
         # SQLiteCache handles disabled mode internally.
         return await self._cache.aget_or_set(key, _call_provider, on_hit=_on_hit, on_miss=_on_miss)
+
+    async def aclose(self) -> None:
+        """Best-effort close of underlying HTTP client."""
+        close = getattr(self._client, "close", None)
+        if callable(close):
+            result = close()
+            if inspect.isawaitable(result):
+                await result
+
+
+class GigaChatChatProvider:
+    """Native GigaChat provider.
+
+    Uses the official `gigachat` Python SDK under the hood. The SDK supports
+    mTLS options (cert/key/CA bundle) and async requests.
+    """
+
+    def __init__(self, settings: llm_Settnigs, *, cache: SQLiteCache | None = None):
+        try:
+            from gigachat import GigaChat  # type: ignore
+        except Exception as e:  # noqa: BLE001
+            raise RuntimeError(
+                "GigaChat provider is enabled, but the 'gigachat' SDK is not installed. "
+                "Add 'gigachat' (or 'langchain-gigachat', which depends on it) to your image."
+            ) from e
+
+        self._base_url = str(settings.llm_api_base)
+        self._default_model = settings.llm_model_name
+
+        # NOTE: Settings names mirror gigachat SDK options.
+        self._client = GigaChat(
+            credentials=settings.llm_api_key,
+            model=settings.llm_model_name,
+            base_url=str(settings.llm_api_base),
+            auth_url=getattr(settings, "llm_auth_url", None),
+            scope=getattr(settings, "llm_scope", None),
+            timeout=float(getattr(settings, "llm_timeout", 300.0) or 300.0),
+            verify_ssl_certs=bool(getattr(settings, "llm_verify_ssl_certs", True)),
+            ca_bundle_file=getattr(settings, "llm_ca_bundle_file", None),
+            cert_file=getattr(settings, "llm_cert_file", None),
+            key_file=getattr(settings, "llm_key_file", None),
+            key_file_password=getattr(settings, "llm_key_file_password", None),
+        )
+
+        if cache is not None:
+            self._cache = cache
+        else:
+            cache_path = getattr(settings, "llm_cache_path_resolved", None) or settings.llm_cache_path
+            self._cache = SQLiteCache(
+                path=str(cache_path),
+                ttl_seconds=int(getattr(settings, "llm_cache_ttl", 0) or 0),
+                enabled=bool(getattr(settings, "llm_cache_enabled", False)),
+            )
+
+    def _cache_key(self, payload: dict[str, Any]) -> str:
+        digest = make_key(
+            namespace="gigachat.chat",
+            data={"base_url": self._base_url, "payload": payload},
+        )
+        return f"chat:{digest}"
+
+    async def complete(self, request: ChatCompletionRequest) -> dict[str, Any]:
+        model = request.model or self._default_model
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": [
+                {"role": m.role, "content": _as_jsonable_content(m.content)}
+                for m in request.messages
+            ],
+        }
+
+        # Optional generation params (OpenAI-like naming, matches GigaChat SDK payload style).
+        if request.temperature is not None:
+            payload["temperature"] = float(request.temperature)
+        if request.top_p is not None:
+            payload["top_p"] = float(request.top_p)
+        if request.max_tokens is not None:
+            payload["max_tokens"] = int(request.max_tokens)
+        if request.stop:
+            payload["stop"] = request.stop
+
+        key = self._cache_key(payload)
+
+        async def _call_provider() -> dict[str, Any]:
+            # The SDK exposes async chat via `achat(payload)`.
+            response = await self._client.achat(payload)  # type: ignore[attr-defined]
+            dumped = _dump_obj(response)
+            # Response shape is OpenAI-like (choices/message/content); keep as-is.
+            return dumped  # type: ignore[no-any-return]
+
+        def _on_hit(k: str) -> None:
+            logger.info("[CACHE HIT] /v1/chat key=%s provider=gigachat model=%s", k, model)
+
+        def _on_miss(k: str) -> None:
+            logger.info("[CACHE MISS] /v1/chat key=%s provider=gigachat model=%s", k, model)
+
+        return await self._cache.aget_or_set(key, _call_provider, on_hit=_on_hit, on_miss=_on_miss)
+
+    async def aclose(self) -> None:
+        """Best-effort close of underlying client, if supported."""
+        close = getattr(self._client, "close", None)
+        if callable(close):
+            result = close()
+            if inspect.isawaitable(result):
+                await result
+        aclose = getattr(self._client, "aclose", None)
+        if callable(aclose):
+            result = aclose()
+            if inspect.isawaitable(result):
+                await result
+
+
+def make_chat_provider(settings: llm_Settnigs, *, cache: SQLiteCache | None = None) -> ChatProvider:
+    """Single place where provider compatibility is decided."""
+
+    provider = (getattr(settings, "llm_provider", "openai") or "openai").lower()
+    if provider not in {"openai", "gigachat"}:
+        # Soft fallback based on base_url.
+        base = str(getattr(settings, "llm_api_base", "") or "").lower()
+        provider = "gigachat" if "gigachat" in base or "giga.chat" in base else "openai"
+
+    if provider == "gigachat":
+        return GigaChatChatProvider(settings, cache=cache)
+    return OpenAIChatProvider(settings, cache=cache)
