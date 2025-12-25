@@ -1,298 +1,575 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Host-side CLI helper for running llm-proxy docker container with profiles.
-# Designed to be installed into ~/.local/bin/llm-proxy (or /usr/local/bin).
+# llm-proxy — local helper for managing LLM Proxy docker container + env profiles.
+# Profiles/caches live under $HOME (XDG dirs by default). install/uninstall/reinstall never delete them.
 
-LLM_PROXY_HOME="${LLM_PROXY_HOME:-$HOME/.llm-proxy}"
-PROFILES_DIR="$LLM_PROXY_HOME/profiles"
-CURRENT_LINK="$LLM_PROXY_HOME/current_profile"
+PROG="llm-proxy"
 
-DEFAULT_IMAGE="${LLM_PROXY_IMAGE:-backplane/llm:latest}"
+die() { echo "$PROG: $*" >&2; exit 1; }
+warn() { echo "$PROG: $*" >&2; }
+is_macos() { [[ "${OSTYPE:-}" == "darwin"* ]]; }
 
-_die() { echo "error: $*" >&2; exit 1; }
-_need() { command -v "$1" >/dev/null 2>&1 || _die "missing dependency: $1"; }
-
-_usage() {
-  cat >&2 <<'USAGE'
-llm-proxy — host-side CLI for llm-proxy docker image
-
-Usage:
-  llm-proxy init
-  llm-proxy up [--image IMAGE]
-  llm-proxy down
-  llm-proxy status
-  llm-proxy logs
-  llm-proxy health
-
-  llm-proxy profile list
-  llm-proxy profile use <name>
-  llm-proxy profile edit <name>
-  llm-proxy profile current
-
-Notes:
-  - Profiles are stored in ~/.llm-proxy/profiles/<name>.sh
-  - Current profile is a symlink ~/.llm-proxy/current_profile
-  - Secrets (LLM_API_KEY) should live only in your HOME, not in git.
-USAGE
-}
-
-_write_default_profiles() {
-  mkdir -p "$PROFILES_DIR"
-
-  # default profile template
-  if [[ ! -f "$PROFILES_DIR/default.sh" ]]; then
-    cat > "$PROFILES_DIR/default.sh" <<'PROFILE'
-#!/usr/bin/env bash
-
-# Настройки профиля
-export PROFILE_NAME="default"
-export LLM_API_BASE=""
-export LLM_API_KEY=""
-export LLM_MODEL_NAME=""
-
-# Базовые настройки
-export LLM_PORT=8002
-export CACHE_HOST_DIR="$HOME/.llm-proxy/cache/$PROFILE_NAME"
-export DUMP_HOST_DIR="$HOME/.llm-proxy/dumps/$PROFILE_NAME"
-export LOGS_HOST_DIR="$HOME/.llm-proxy/logs/$PROFILE_NAME"
-export CACHE_CONTAINER_DIR="/cache"
-export DUMP_CONTAINER_DIR="/dumps"
-export LOGS_CONTAINER_DIR="/logs"
-PROFILE
-    chmod 0644 "$PROFILES_DIR/default.sh"
-  fi
-
-  # example OpenRouter profile (NO secrets)
-  if [[ ! -f "$PROFILES_DIR/openrouter.example.sh" ]]; then
-    cat > "$PROFILES_DIR/openrouter.example.sh" <<'PROFILE'
-#!/usr/bin/env bash
-
-# Пример профиля (скопируйте в openrouter.sh и задайте ключ)
-export PROFILE_NAME="openrouter"
-export LLM_API_BASE="https://openrouter.ai/api/v1"
-export LLM_API_KEY=""
-export LLM_MODEL_NAME="gpt-4o-mini"  # пример
-
-export LLM_PORT=8002
-export CACHE_HOST_DIR="$HOME/.llm-proxy/cache/$PROFILE_NAME"
-export DUMP_HOST_DIR="$HOME/.llm-proxy/dumps/$PROFILE_NAME"
-export LOGS_HOST_DIR="$HOME/.llm-proxy/logs/$PROFILE_NAME"
-export CACHE_CONTAINER_DIR="/cache"
-export DUMP_CONTAINER_DIR="/dumps"
-export LOGS_CONTAINER_DIR="/logs"
-PROFILE
-    chmod 0644 "$PROFILES_DIR/openrouter.example.sh"
-  fi
-}
-
-_resolve_current_profile() {
-  if [[ -L "$CURRENT_LINK" ]]; then
-    local target
-    target="$(readlink "$CURRENT_LINK")"
-    # If link is relative, make it relative to home dir
-    if [[ "$target" != /* ]]; then
-      target="$LLM_PROXY_HOME/$target"
-    fi
-    echo "$target"
+# ---------------------------
+# Paths (XDG + legacy support)
+# ---------------------------
+resolve_home() {
+  if [[ -n "${LLM_PROXY_HOME:-}" ]]; then
+    echo "${LLM_PROXY_HOME}"
     return
   fi
-  echo "$PROFILES_DIR/default.sh"
-}
-
-_load_profile() {
-  local profile_path
-  profile_path="$(_resolve_current_profile)"
-
-  if [[ ! -f "$profile_path" ]]; then
-    _die "profile not found: $profile_path (run: llm-proxy init)"
+  # Legacy: if ~/.llm-proxy exists, keep using it to avoid breaking existing installs.
+  if [[ -d "${HOME}/.llm-proxy" ]]; then
+    echo "${HOME}/.llm-proxy"
+    return
   fi
-
-  # shellcheck disable=SC1090
-  source "$profile_path"
-
-  # Backfill defaults like config.sh did
-  PROFILE_NAME="${PROFILE_NAME:-default}"
-  export PROFILE_NAME
-
-  export LLM_PORT="${LLM_PORT:-8002}"
-
-  export CACHE_HOST_DIR="${CACHE_HOST_DIR:-$HOME/.llm-proxy/cache/$PROFILE_NAME}"
-  export DUMP_HOST_DIR="${DUMP_HOST_DIR:-$HOME/.llm-proxy/dumps/$PROFILE_NAME}"
-  export LOGS_HOST_DIR="${LOGS_HOST_DIR:-$HOME/.llm-proxy/logs/$PROFILE_NAME}"
-
-  export CACHE_CONTAINER_DIR="${CACHE_CONTAINER_DIR:-/cache}"
-  export DUMP_CONTAINER_DIR="${DUMP_CONTAINER_DIR:-/dumps}"
-  export LOGS_CONTAINER_DIR="${LOGS_CONTAINER_DIR:-/logs}"
-
-  mkdir -p "$CACHE_HOST_DIR" "$DUMP_HOST_DIR" "$LOGS_HOST_DIR"
+  echo ""
 }
 
-_container_name() {
-  echo "llm-proxy-${PROFILE_NAME:-default}"
-}
+resolve_dirs() {
+  local legacy_home
+  legacy_home="$(resolve_home)"
 
-_cmd_init() {
-  _write_default_profiles
-
-  # Create/refresh current profile symlink to default
-  mkdir -p "$LLM_PROXY_HOME"
-  ln -snf "$PROFILES_DIR/default.sh" "$CURRENT_LINK"
-
-  # Ensure data dirs exist
-  # shellcheck disable=SC1090
-  source "$PROFILES_DIR/default.sh"
-  mkdir -p "$HOME/.llm-proxy/cache/$PROFILE_NAME" "$HOME/.llm-proxy/dumps/$PROFILE_NAME" "$HOME/.llm-proxy/logs/$PROFILE_NAME"
-
-  echo "Initialized profiles in: $PROFILES_DIR" >&2
-  echo "Current profile: default" >&2
-}
-
-_cmd_profile_list() {
-  mkdir -p "$PROFILES_DIR"
-  ls -1 "$PROFILES_DIR" 2>/dev/null | sed -n 's/\.sh$//p' | sort
-}
-
-_cmd_profile_current() {
-  local p
-  p="$(_resolve_current_profile)"
-  if [[ -L "$CURRENT_LINK" ]]; then
-    echo "$(basename "$p" .sh)"  # current profile name
+  if [[ -n "$legacy_home" ]]; then
+    CONFIG_DIR="${legacy_home}/config"
+    DATA_DIR="${legacy_home}/data"
+    CACHE_DIR="${legacy_home}/cache"
   else
-    echo "default"
+    CONFIG_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/${PROG}"
+    DATA_DIR="${XDG_DATA_HOME:-${HOME}/.local/share}/${PROG}"
+    CACHE_DIR="${XDG_CACHE_HOME:-${HOME}/.cache}/${PROG}"
+  fi
+
+  PROFILES_DIR="${CONFIG_DIR}/profiles"
+  ACTIVE_FILE="${CONFIG_DIR}/active_profile"
+
+  # Per-profile "owned" dirs we can safely delete on profile delete:
+  PROFILE_DATA_ROOT="${DATA_DIR}/profiles"
+  PROFILE_LOG_ROOT="${DATA_DIR}/logs"
+  PROFILE_CACHE_ROOT="${CACHE_DIR}/profiles"
+}
+
+ensure_dirs() {
+  mkdir -p "$CONFIG_DIR" "$DATA_DIR" "$CACHE_DIR" "$PROFILES_DIR"            "$PROFILE_DATA_ROOT" "$PROFILE_LOG_ROOT" "$PROFILE_CACHE_ROOT"
+}
+
+sanitize_profile_name() {
+  local name="${1:-}"
+  [[ -n "$name" ]] || return 1
+  if [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    echo "$name"
+    return 0
+  fi
+  return 1
+}
+
+profile_env_path() {
+  local name="$1"
+  echo "${PROFILES_DIR}/${name}.env"
+}
+
+profile_owned_dirs() {
+  local name="$1"
+  echo "${PROFILE_DATA_ROOT}/${name}"$'\n'"${PROFILE_LOG_ROOT}/${name}"$'\n'"${PROFILE_CACHE_ROOT}/${name}"
+}
+
+get_active_profile() {
+  if [[ -f "$ACTIVE_FILE" ]]; then
+    sed -n '1p' "$ACTIVE_FILE" | tr -d '[:space:]'
+  else
+    echo ""
   fi
 }
 
-_cmd_profile_use() {
-  local name="${1:-}"; [[ -n "$name" ]] || _die "profile name required"
-  local path="$PROFILES_DIR/${name}.sh"
-  [[ -f "$path" ]] || _die "profile file not found: $path"
-  ln -snf "$path" "$CURRENT_LINK"
-  echo "Using profile: $name" >&2
+set_active_profile() {
+  local name="$1"
+  printf '%s\n' "$name" > "$ACTIVE_FILE"
 }
 
-_cmd_profile_edit() {
-  local name="${1:-}"; [[ -n "$name" ]] || _die "profile name required"
-  local path="$PROFILES_DIR/${name}.sh"
-  [[ -f "$path" ]] || _die "profile file not found: $path"
-  local editor="${EDITOR:-nano}"
-  exec "$editor" "$path"
+clear_active_profile() {
+  rm -f "$ACTIVE_FILE"
 }
 
-_cmd_up() {
-  _need docker
-
-  local image="$DEFAULT_IMAGE"
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --image) image="$2"; shift 2;;
-      -h|--help) _usage; exit 0;;
-      *) _die "unknown arg: $1";;
-    esac
+list_profiles() {
+  local f
+  shopt -s nullglob
+  for f in "${PROFILES_DIR}/"*.env; do
+    basename "$f" .env
   done
+  shopt -u nullglob
+}
 
-  _load_profile
+# ---------------------------
+# Template & editing
+# ---------------------------
+profile_template() {
+  cat <<'EOF'
+# LLM Proxy profile (.env)
+# Заполни значения справа. Комментарии можно оставлять.
+# Формат: KEY=value
 
+# --- Upstream provider ---
+LLM_PROVIDER=openai
+LLM_API_BASE=https://api.openai.com/v1
+LLM_API_KEY=CHANGEME
+LLM_MODEL_NAME=gpt-4o-mini
+LLM_TIMEOUT=300
+LLM_TEMPERATURE=0
+LLM_TOP_P=1
+LLM_MAX_TOKENS=50000
+LLM_VERBOSE=true
+
+# --- TLS / mTLS (опционально) ---
+# LLM_VERIFY_SSL_CERTS=true
+# LLM_CA_BUNDLE_FILE=
+# LLM_CERT_FILE=
+# LLM_KEY_FILE=
+# LLM_KEY_FILE_PASSWORD=
+
+# --- GigaChat (если LLM_PROVIDER=gigachat) ---
+# LLM_SCOPE=
+# LLM_AUTH_URL=
+
+# --- Queue / priorities ---
+LLM_MAX_CONCURRENT=1
+LLM_QUEUE_MAX_LEN=100
+LLM_PRIORITY_DEFAULT=p2
+LLM_PRIORITY_SLOTS_P1=2
+LLM_PRIORITY_SLOTS_P2=1
+LLM_PRIORITY_SLOTS_P3=1
+
+# --- Cache (обычно достаточно) ---
+LLM_CACHE_ENABLED=true
+# Если LLM_CACHE_PATH не задан, будет использовано: CACHE_CONTAINER_DIR + LLM_CACHE_FILE
+CACHE_CONTAINER_DIR=/home/appuser/app/cache
+# Если LLM_LOG_DIR не задан, будет использовано: /logs
+LLM_LOG_DIR=/logs
+LLM_CACHE_FILE=llm_cache.sqlite
+LLM_CACHE_TTL=600000
+
+# --- Service runtime ---
+LOG_LEVEL=INFO
+ENV=development
+TESTING=false
+LLM_PORT=8002
+
+# --- Docker (управляется CLI) ---
+LLM_PROXY_IMAGE=backplane/llm:latest
+# LLM_HOST_PORT=8002
+
+EOF
+}
+
+ensure_profile_prefilled() {
+  local name="$1"
+  local file
+  file="$(profile_env_path "$name")"
+  if [[ -f "$file" ]]; then
+    return
+  fi
+  mkdir -p "$(dirname "$file")"
+  profile_template > "$file"
+
+  while IFS= read -r d; do
+    mkdir -p "$d"
+  done < <(profile_owned_dirs "$name")
+}
+
+run_editor() {
+  local file="$1"
+
+  if [[ -n "${LLM_PROXY_EDITOR:-}" ]]; then
+    eval "${LLM_PROXY_EDITOR} \"${file}\""
+    return
+  fi
+
+  if [[ -n "${EDITOR:-}" ]]; then
+    eval "${EDITOR} \"${file}\""
+    return
+  fi
+
+  if is_macos; then
+    /usr/bin/open -W -a "TextEdit" "$file"
+  else
+    command -v nano >/dev/null 2>&1 || die "nano not found; set EDITOR or LLM_PROXY_EDITOR"
+    nano "$file"
+  fi
+}
+
+# ---------------------------
+# Docker helpers
+# ---------------------------
+docker_available() {
+  command -v docker >/dev/null 2>&1
+}
+
+require_docker() {
+  docker_available || die "docker not found"
+}
+
+read_env_value() {
+  local key="$1"
+  local file="$2"
+  awk -F= -v k="$key" '
+    $0 ~ "^[[:space:]]*#" {next}
+    $0 ~ "^[[:space:]]*$" {next}
+    $1 == k {sub(/^[^=]*=/,""); print; exit}
+  ' "$file" 2>/dev/null || true
+}
+
+container_name_for_profile() {
+  local name="$1"
+  echo "${PROG}-${name}"
+}
+
+docker_stop_rm_name_best_effort() {
+  local cname="$1"
+  local notice="${2:-}"
+  docker_available || return 0
+
+  if ! docker ps -a --format '{{.Names}}' | grep -Fxq "$cname"; then
+    return 0
+  fi
+
+  if docker rm -f "$cname" >/dev/null 2>&1; then
+    if [[ -n "$notice" ]]; then
+      echo "${notice}: $cname"
+    fi
+  else
+    warn "не удалось погасить контейнер: $cname (best-effort)"
+  fi
+}
+
+docker_stop_profile_best_effort() {
+  local name="$1"
+  local notice="${2:-}"
+  docker_stop_rm_name_best_effort "$(container_name_for_profile "$name")" "$notice"
+}
+
+docker_stop_all_llm_proxy_containers_best_effort() {
+  docker_available || return 0
   local cname
-  cname="$(_container_name)"
-
-  echo "Profile: ${PROFILE_NAME}" >&2
-  echo "Container: ${cname}" >&2
-  echo "Port: ${LLM_PORT}" >&2
-  echo "Model: ${LLM_MODEL_NAME:-<not set>}" >&2
-
-  # Stop/remove old container if exists
-  docker stop "$cname" >/dev/null 2>&1 || true
-  docker rm "$cname" >/dev/null 2>&1 || true
-
-  # Cache knobs (defaults match your current run.sh)
-  local cache_enabled="${LLM_CACHE_ENABLED:-True}"
-  local cache_ttl="${LLM_CACHE_TTL:-600000}"
-  local cache_file="${LLM_CACHE_FILE:-llm_cache.sqlite}"
-
-  # Build docker run command safely (no eval)
-  cmd=(docker run -d
-    --name "$cname"
-    --restart unless-stopped
-    -p "${LLM_PORT}:${LLM_PORT}"
-    -e "LLM_HOST=0.0.0.0"
-    -e "LLM_PORT=${LLM_PORT}"
-    -e "LOG_FILE_PATH=${LOGS_CONTAINER_DIR}/llm-errors.log"
-    -e "DUMP_DIR=${DUMP_CONTAINER_DIR}"
-    -e "LLM_CACHE_ENABLED=${cache_enabled}"
-    -e "LLM_CACHE_TTL=${cache_ttl}"
-    -e "LLM_CACHE_FILE=${cache_file}"
-    -v "${CACHE_HOST_DIR}:${CACHE_CONTAINER_DIR}"
-    -v "${DUMP_HOST_DIR}:${DUMP_CONTAINER_DIR}"
-    -v "${LOGS_HOST_DIR}:${LOGS_CONTAINER_DIR}"
-  )
-
-  [[ -n "${LLM_API_BASE:-}" ]] && cmd+=(-e "LLM_API_BASE=${LLM_API_BASE}")
-  [[ -n "${LLM_API_KEY:-}" ]]  && cmd+=(-e "LLM_API_KEY=${LLM_API_KEY}")
-  [[ -n "${LLM_MODEL_NAME:-}" ]] && cmd+=(-e "LLM_MODEL_NAME=${LLM_MODEL_NAME}")
-
-  cmd+=("$image")
-
-  "${cmd[@]}" >/dev/null
-
-  echo "Started: $cname" >&2
-  echo "Health: curl http://localhost:${LLM_PORT}/health" >&2
+  while IFS= read -r cname; do
+    [[ -n "$cname" ]] || continue
+    docker_stop_rm_name_best_effort "$cname" "Погасили старый контейнер"
+  done < <(docker ps -a --filter "name=^/${PROG}-" --format '{{.Names}}')
 }
 
-_cmd_down() {
-  _need docker
-  _load_profile
+docker_start_profile() {
+  local name="$1"
+  local env_file image llm_port host_port cache_container_dir cache_root logs_root cname
+
+  env_file="$(profile_env_path "$name")"
+  [[ -f "$env_file" ]] || die "profile not found: $name"
+
+  image="$(read_env_value "LLM_PROXY_IMAGE" "$env_file")"
+  [[ -n "$image" ]] || image="llm-proxy:latest"
+
+  llm_port="$(read_env_value "LLM_PORT" "$env_file")"
+  [[ -n "$llm_port" ]] || llm_port="8002"
+
+  host_port="$(read_env_value "LLM_HOST_PORT" "$env_file")"
+  [[ -n "$host_port" ]] || host_port="$llm_port"
+
+  cache_container_dir="$(read_env_value "CACHE_CONTAINER_DIR" "$env_file")"
+  [[ -n "$cache_container_dir" ]] || cache_container_dir="home/appuser/app/cache"
+
+  log_container_dir="$(read_env_value "LOG_CONTAINER_DIR" "$env_file")"
+  [[ -n "$log_container_dir" ]] || log_container_dir="/logs"
+
+  cname="$(container_name_for_profile "$name")"
+  cache_root="${PROFILE_CACHE_ROOT}/${name}"
+  logs_root="${PROFILE_LOG_ROOT}/${name}"
+
+  mkdir -p "$cache_root" "$logs_root"
+
+  require_docker
+
+  # DX rule: only one llm-proxy container at a time (avoid port conflicts).
+  docker_stop_all_llm_proxy_containers_best_effort
+
+  docker run -d     --name "$cname"     --env-file "$env_file"     -p "${host_port}:${llm_port}"     -v "${cache_root}:${cache_container_dir}"     -v "${logs_root}:/home/appuser/app/logs"     "$image" >/dev/null
+
+  echo "Started: $cname (image=$image, host_port=$host_port -> container_port=$llm_port)"
+}
+
+docker_stop_profile() {
+  local name="$1"
   local cname
-  cname="$(_container_name)"
-  docker stop "$cname" >/dev/null 2>&1 || true
-  docker rm "$cname" >/dev/null 2>&1 || true
-  echo "Stopped: $cname" >&2
+  cname="$(container_name_for_profile "$name")"
+  require_docker
+  if docker ps -a --format '{{.Names}}' | grep -Fxq "$cname"; then
+    docker_stop_rm_name_best_effort "$cname" "Остановили контейнер"
+  else
+    echo "Контейнер не найден: $cname (ничего не остановлено)"
+  fi
 }
 
-_cmd_status() {
-  _need docker
-  _load_profile
+docker_status_profile() {
+  local name="$1"
   local cname
-  cname="$(_container_name)"
-  docker ps --filter "name=^/${cname}$" --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
+  cname="$(container_name_for_profile "$name")"
+  require_docker
+  if docker ps --format '{{.Names}}' | grep -Fxq "$cname"; then
+    echo "running: $cname"
+    docker ps --filter "name=^/${cname}$" --format '  {{.Names}}  {{.Image}}  {{.Ports}}'
+  elif docker ps -a --format '{{.Names}}' | grep -Fxq "$cname"; then
+    echo "stopped: $cname"
+  else
+    echo "not created: $cname"
+  fi
 }
 
-_cmd_logs() {
-  _need docker
-  _load_profile
-  local cname
-  cname="$(_container_name)"
-  exec docker logs -f "$cname"
+# ---------------------------
+# UX
+# ---------------------------
+confirm() {
+  local prompt="$1"
+  local assume="${2:-}"
+  if [[ "${LLM_PROXY_ASSUME_YES:-}" == "1" ]]; then
+    return 0
+  fi
+  if [[ "$assume" == "1" ]]; then
+    return 0
+  fi
+  if [[ ! -t 0 ]]; then
+    die "refusing to prompt on non-interactive stdin; pass --yes"
+  fi
+  read -r -p "$prompt [y/N] " ans || true
+  [[ "${ans:-}" == "y" || "${ans:-}" == "Y" ]]
 }
 
-_cmd_health() {
-  _need curl
-  _load_profile
-  curl -sS "http://localhost:${LLM_PORT}/health" && echo
+usage() {
+  cat <<EOF
+$PROG — manage LLM Proxy profiles and docker runtime
+
+Usage:
+  $PROG help
+  $PROG list
+  $PROG active
+  $PROG create <name>
+  $PROG edit [name]
+  $PROG use <name>
+  $PROG start [name]
+  $PROG stop [name]
+  $PROG status [name]
+  $PROG delete <name> [--yes]
+
+User install (no sudo):
+  $PROG install
+  $PROG uninstall
+  $PROG reinstall
+
+Examples:
+  $PROG create openrouter  # создать профиль
+  $PROG edit openrouter    # редактировать
+  $PROG use openrouter     # сделать активным (остановит старый контейнер, если он был активным)
+  $PROG start              # запустить активный профиль (перед запуском остановит все llm-proxy-* контейнеры)
+  $PROG start llm7         # переключиться на профиль и запустить (аналог: use+start)
+
+Notes:
+  - По умолчанию редактор на macOS: TextEdit.
+    Можно переопределить: LLM_PROXY_EDITOR="code --wait" или EDITOR="open -e"
+  - На macOS PATH часто задаётся в login-shell файлах: ~/.zprofile или ~/.bash_profile
+EOF
 }
 
+# ---------------------------
+# User install helpers
+# ---------------------------
+path_has_dir() {
+  local d="$1"
+  case ":${PATH}:" in
+    *":${d}:"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+append_path_export_once() {
+  local rc="$1"
+  local marker="# llm-proxy: add ~/.local/bin to PATH"
+  local line='export PATH="$HOME/.local/bin:$PATH"'
+
+  touch "$rc" 2>/dev/null || true
+  if grep -Fq "$line" "$rc" 2>/dev/null; then
+    return 0
+  fi
+  {
+    echo ""
+    echo "$marker"
+    echo "$line"
+  } >> "$rc"
+}
+
+ensure_local_bin_in_path() {
+  local bin_dir="${HOME}/.local/bin"
+  if path_has_dir "$bin_dir"; then
+    return 0
+  fi
+
+  local shell="${SHELL:-}"
+  if [[ "$shell" == */zsh ]]; then
+    append_path_export_once "${HOME}/.zprofile"
+    append_path_export_once "${HOME}/.zshrc"
+  elif [[ "$shell" == */bash ]]; then
+    append_path_export_once "${HOME}/.bash_profile"
+    append_path_export_once "${HOME}/.bashrc"
+  else
+    append_path_export_once "${HOME}/.zprofile"
+    append_path_export_once "${HOME}/.zshrc"
+    append_path_export_once "${HOME}/.bash_profile"
+    append_path_export_once "${HOME}/.bashrc"
+  fi
+
+  warn "~/.local/bin is not currently in PATH."
+  warn "I added an export line to your shell rc. Open a new terminal or run:"
+  warn '  export PATH="$HOME/.local/bin:$PATH"'
+}
+
+cmd_install() {
+  local bin_dir="${HOME}/.local/bin"
+  local target="${bin_dir}/${PROG}"
+  mkdir -p "$bin_dir"
+  install -m 0755 "$0" "$target"
+  echo "Installed to $target"
+  ensure_local_bin_in_path
+}
+
+cmd_uninstall() {
+  local target="${HOME}/.local/bin/${PROG}"
+  rm -f "$target"
+  echo "Removed $target"
+}
+
+cmd_reinstall() {
+  cmd_uninstall
+  cmd_install
+}
+
+# ---------------------------
+# Commands
+# ---------------------------
 main() {
-  local cmd="${1:-}"; shift || true
+  resolve_dirs
+  ensure_dirs
+
+  local cmd="${1:-help}"
+  shift || true
+
+  if [[ "$cmd" == "profile" || "$cmd" == "profiles" ]]; then
+    cmd="${1:-help}"
+    shift || true
+  fi
+
   case "$cmd" in
-    init) _cmd_init;;
-    up|run) _cmd_up "$@";;
-    down|stop) _cmd_down;;
-    status) _cmd_status;;
-    logs) _cmd_logs;;
-    health) _cmd_health;;
-    profile)
-      local sub="${1:-}"; shift || true
-      case "$sub" in
-        list) _cmd_profile_list;;
-        use) _cmd_profile_use "$@";;
-        edit) _cmd_profile_edit "$@";;
-        current) _cmd_profile_current;;
-        "") _usage; exit 1;;
-        *) _die "unknown profile subcommand: $sub";;
-      esac
+    help|-h|--help) usage ;;
+    list|ls) list_profiles ;;
+    active)
+      local a; a="$(get_active_profile)"
+      [[ -n "$a" ]] && echo "$a" || die "no active profile (use: $PROG use <name>)"
       ;;
-    -h|--help|help|"") _usage; exit 0;;
-    *) _die "unknown command: $cmd (use --help)";;
+    create)
+      local name="${1:-}"; [[ -n "$name" ]] || die "usage: $PROG create <name>"
+      name="$(sanitize_profile_name "$name")" || die "invalid profile name (use letters/digits/._-)"
+      ensure_profile_prefilled "$name"; echo "Created: $name"
+      ;;
+    edit)
+      local name="${1:-}"
+      if [[ -z "$name" ]]; then
+        name="$(get_active_profile)"; [[ -n "$name" ]] || die "no active profile; use: $PROG edit <name> or $PROG use <name>"
+      fi
+      name="$(sanitize_profile_name "$name")" || die "invalid profile name (use letters/digits/._-)"
+      ensure_profile_prefilled "$name"; run_editor "$(profile_env_path "$name")"
+      ;;
+    use|switch)
+      local name="${1:-}"; [[ -n "$name" ]] || die "usage: $PROG use <name>"
+      name="$(sanitize_profile_name "$name")" || die "invalid profile name (use letters/digits/._-)"
+      ensure_profile_prefilled "$name"
+
+      local current; current="$(get_active_profile)"
+      if [[ -n "$current" && "$current" == "$name" ]]; then
+        echo "Active: $name (unchanged)"
+        exit 0
+      fi
+
+      # DX rule: if switching profiles, stop old active container (best-effort).
+      if [[ -n "$current" ]]; then
+        docker_stop_profile_best_effort "$current" "Погасили контейнер активного профиля перед переключением"
+      fi
+
+      set_active_profile "$name"
+      echo "Active: $name"
+      ;;
+    start|up|run)
+      local requested="${1:-}"
+      local current; current="$(get_active_profile)"
+      local name
+
+      if [[ -n "$requested" ]]; then
+        name="$(sanitize_profile_name "$requested")" || die "invalid profile name (use letters/digits/._-)"
+        ensure_profile_prefilled "$name"
+        if [[ -n "$current" && "$current" != "$name" ]]; then
+          docker_stop_profile_best_effort "$current" "Погасили контейнер предыдущего профиля перед запуском нового"
+        fi
+        set_active_profile "$name"
+      else
+        name="$current"
+        [[ -n "$name" ]] || die "no active profile; use: $PROG use <name>"
+      fi
+
+      docker_start_profile "$name"
+      ;;
+    stop|down)
+      local name="${1:-}"
+      if [[ -z "$name" ]]; then
+        name="$(get_active_profile)"; [[ -n "$name" ]] || die "no active profile; use: $PROG stop <name>"
+      else
+        name="$(sanitize_profile_name "$name")" || die "invalid profile name (use letters/digits/._-)"
+      fi
+      docker_stop_profile "$name"
+      ;;
+    status)
+      local name="${1:-}"
+      if [[ -z "$name" ]]; then
+        name="$(get_active_profile)"; [[ -n "$name" ]] || die "no active profile; use: $PROG status <name>"
+      else
+        name="$(sanitize_profile_name "$name")" || die "invalid profile name (use letters/digits/._-)"
+      fi
+      docker_status_profile "$name"
+      ;;
+    delete|rm|remove)
+      local name="${1:-}"; [[ -n "$name" ]] || die "usage: $PROG delete <name> [--yes]"
+      shift || true
+      local assume_yes="0"
+      [[ "${1:-}" == "--yes" || "${1:-}" == "-y" ]] && assume_yes="1"
+
+      name="$(sanitize_profile_name "$name")" || die "invalid profile name (use letters/digits/._-)"
+      local env_file; env_file="$(profile_env_path "$name")"
+      [[ -f "$env_file" ]] || die "profile not found: $name"
+
+      if ! confirm "Delete profile '$name' and its profile-owned data (logs/cache)?" "$assume_yes"; then
+        echo "Cancelled."; exit 0
+      fi
+
+      local active; active="$(get_active_profile)"
+      if [[ "$active" == "$name" ]]; then
+        docker_stop_profile_best_effort "$name"
+        clear_active_profile
+      else
+        docker_stop_profile_best_effort "$name"
+      fi
+
+      rm -f "$env_file"
+      while IFS= read -r d; do [[ -d "$d" ]] && rm -rf "$d"; done < <(profile_owned_dirs "$name")
+      echo "Deleted: $name"
+      ;;
+    install) cmd_install ;;
+    uninstall) cmd_uninstall ;;
+    reinstall) cmd_reinstall ;;
+    *)
+      usage
+      die "unknown command: $cmd"
+      ;;
   esac
 }
 
