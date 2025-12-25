@@ -4,8 +4,8 @@ from __future__ import annotations
 import inspect
 import json
 import logging
-from pathlib import Path
 import ssl
+from pathlib import Path
 from typing import Any, Protocol
 
 import httpx
@@ -16,6 +16,8 @@ from llm.models.chat import ChatCompletionRequest
 from llm.services.cache import SQLiteCache, make_key
 
 logger = logging.getLogger(__name__)
+
+_RESERVED_RESPONSE_KEYS = {"x_headers"}  # service metadata; must NOT leak into JSON for some SDKs
 
 class ChatProvider(Protocol):
     async def complete(self, request: ChatCompletionRequest) -> dict[str, Any]:
@@ -38,20 +40,64 @@ def _as_jsonable_content(content: Any) -> str:
         return str(content)
 
 
+def _normalize_response_dict(data: dict[str, Any]) -> dict[str, Any]:
+    """
+    Provider-agnostic response normalization.
+
+    Why: some SDKs (notably GigaChat python) build a response model as:
+      Model(x_headers=from_http_headers(response), **response.json())
+    If our proxy returns `x_headers` inside JSON body, the SDK passes it twice -> TypeError.
+    """
+    # Do not mutate caller's dict (could be cached/shared)
+    out = dict(data)
+
+    # Remove reserved metadata keys
+    for k in _RESERVED_RESPONSE_KEYS:
+        out.pop(k, None)
+
+    # Defensive: if something somewhere produced "python field names" instead of JSON aliases
+    if "object_" in out and "object" not in out:
+        out["object"] = out.pop("object_")
+    if "id_" in out and "id" not in out:
+        out["id"] = out.pop("id_")
+
+    return out
+
+
 def _dump_obj(obj: Any) -> Any:
-    """Best-effort conversion to dict for SDK responses."""
-    
+    """Best-effort conversion to JSON-serializable primitives/dicts for SDK responses."""
     if isinstance(obj, dict):
-        return obj
+        return _normalize_response_dict(obj)
+
     if hasattr(obj, "model_dump"):
-        return obj.model_dump()  # type: ignore[no-any-return]
+        # pydantic v2
+        try:
+            data = obj.model_dump(by_alias=True)  # type: ignore[no-any-return]
+        except TypeError:
+            data = obj.model_dump()  # type: ignore[no-any-return]
+        if isinstance(data, dict):
+            return _normalize_response_dict(data)
+        return data
+
     if hasattr(obj, "dict"):
-        return obj.dict()  # type: ignore[no-any-return]
+        # pydantic v1
+        try:
+            data = obj.dict(by_alias=True)  # type: ignore[no-any-return]
+        except TypeError:
+            data = obj.dict()  # type: ignore[no-any-return]
+        if isinstance(data, dict):
+            return _normalize_response_dict(data)
+        return data
+
     if hasattr(obj, "json"):
         try:
-            return json.loads(obj.json())
+            data = json.loads(obj.json())
+            if isinstance(data, dict):
+                return _normalize_response_dict(data)
+            return data
         except Exception:  # noqa: BLE001
             pass
+
     return obj
 
 
