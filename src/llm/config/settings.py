@@ -46,7 +46,6 @@ class Settings(BaseSettings):
 
     # GigaChat-specific
     llm_scope: str | None            = Field(None,                validation_alias="LLM_SCOPE")
-    llm_auth_url: str | None         = Field(None,                validation_alias="LLM_AUTH_URL")
 
     #  Настройки очередей
     llm_max_concurrent:int           = Field(1,                   validation_alias="LLM_MAX_CONCURRENT")
@@ -74,7 +73,7 @@ class Settings(BaseSettings):
     testing:           bool          = Field(False,              validation_alias="TESTING")
 
     # Для Bearer-аутентификации
-    # llm_auth_url: Optional[str] =                   Field(None, env="GIGACHAT_AUTH_URL")
+    # llm_auth_url: Optional[str] =                   Field(None, env="LLM_AUTH_URL")
     # llm_auth_client_id: Optional[str] = None
     # llm_auth_client_secret: Optional[str] = None
     # Или для Basic-аутентификации при получении токена
