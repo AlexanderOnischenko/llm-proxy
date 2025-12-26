@@ -26,6 +26,11 @@ if [[ -n "${UVICORN_WORKERS:-}" && "${UVICORN_WORKERS}" != "1" ]]; then
   exit 1
 fi
 
+if [[ "${LLM_HOST:-}" == "localhost" || "${LLM_HOST:-}" == "127.0.0.1" ]]; then
+  echo "LLM_HOST must not be localhost/127.0.0.1 inside container. Use 0.0.0.0" >&2
+  exit 1
+fi
+
 HOST="${LLM_HOST:-0.0.0.0}"
 LLM_PORT="${LLM_PORT:-${PORT:-8002}}"
 APP_MODULE="${APP_MODULE:-llm.main:app}"
