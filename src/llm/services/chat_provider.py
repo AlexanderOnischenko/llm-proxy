@@ -253,14 +253,7 @@ class GigaChatProvider:
     def __init__(self, settings: llm_Settnigs, *, cache: SQLiteCache | None = None):
         self._base_url = str(settings.llm_api_base)
         self._default_model = settings.llm_model_name
-
-        # GigaChat in our deployments requires mTLS on every request.
-        cert_file = getattr(settings, "llm_cert_file", None)
-        key_file = getattr(settings, "llm_key_file", None)
-        if not cert_file or not key_file:
-            raise ValueError("GigaChat requires both LLM_CERT_FILE and LLM_KEY_FILE (mTLS)")
-
-        # Local import: allow the rest of the project to work without gigachat extras.
+        
         try:
             from gigachat import GigaChat  # type: ignore
         except Exception as exc:  # noqa: BLE001
@@ -270,11 +263,15 @@ class GigaChatProvider:
 
         ctx = _build_mtls_ssl_context(settings)
 
+        verify_ssl = bool(getattr(settings, "llm_verify_ssl", True))
+        scope = getattr(settings, "llm_scope", None)
+
         self._client = GigaChat(
             model=settings.llm_model_name,
+            scope=scope,
             base_url=str(settings.llm_api_base),
             timeout=float(getattr(settings, "llm_timeout", 300.0) or 300.0),
-            verify_ssl_certs=True,
+            verify_ssl_certs=verify_ssl,
             ssl_context=ctx,
             # ВАЖНО: чтобы не попасть в verify=str/cert=... ветку внутри httpx — лучше не передавать:
             ca_bundle_file=None,
