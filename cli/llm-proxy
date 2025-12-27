@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# llm-proxy — local helper for managing LLM Proxy docker container + env profiles.
-# Profiles/caches live under $HOME (XDG dirs by default). install/uninstall/reinstall never delete them.
+# llm-proxy — manage LLM Proxy profiles + docker compose runtime.
+# Profiles live under $HOME (XDG dirs by default). Repo stays clean.
 
 PROG="llm-proxy"
 
@@ -50,7 +50,8 @@ resolve_dirs() {
 }
 
 ensure_dirs() {
-  mkdir -p "$CONFIG_DIR" "$DATA_DIR" "$CACHE_DIR" "$PROFILES_DIR"            "$PROFILE_DATA_ROOT" "$PROFILE_LOG_ROOT" "$PROFILE_CACHE_ROOT"
+  mkdir -p "$CONFIG_DIR" "$DATA_DIR" "$CACHE_DIR" "$PROFILES_DIR" \
+           "$PROFILE_DATA_ROOT" "$PROFILE_LOG_ROOT" "$PROFILE_CACHE_ROOT"
 }
 
 sanitize_profile_name() {
@@ -63,9 +64,14 @@ sanitize_profile_name() {
   return 1
 }
 
-profile_env_path() {
+profile_compose_env_path() {
   local name="$1"
   echo "${PROFILES_DIR}/${name}.env"
+}
+
+profile_runtime_env_path() {
+  local name="$1"
+  echo "${PROFILES_DIR}/${name}.llm.env"
 }
 
 profile_owned_dirs() {
@@ -100,79 +106,113 @@ list_profiles() {
 }
 
 # ---------------------------
+# Project dir (where compose.yaml lives)
+# ---------------------------
+resolve_project_dir() {
+  # 1) explicit override
+  if [[ -n "${LLM_PROXY_PROJECT_DIR:-}" ]]; then
+    [[ -f "${LLM_PROXY_PROJECT_DIR}/compose.yaml" ]] || die "compose.yaml not found in LLM_PROXY_PROJECT_DIR=${LLM_PROXY_PROJECT_DIR}"
+    echo "${LLM_PROXY_PROJECT_DIR}"
+    return
+  fi
+
+  # 2) current working dir
+  if [[ -f "${PWD}/compose.yaml" ]]; then
+    echo "${PWD}"
+    return
+  fi
+
+  # 3) relative to script location (works when running from repo checkout)
+  local here
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  if [[ -f "${here}/compose.yaml" ]]; then
+    echo "${here}"
+    return
+  fi
+
+  die "cannot locate compose.yaml. Run from repo root, or set LLM_PROXY_PROJECT_DIR=/path/to/repo"
+}
+
+# ---------------------------
 # Template & editing
 # ---------------------------
-profile_template() {
+runtime_env_template() {
   cat <<'EOF'
-# LLM Proxy profile (.env)
-# Заполни значения справа. Комментарии можно оставлять.
-# Формат: KEY=value
+# Runtime env for llm-proxy (matches llm/config/settings.py)
 
-# --- Upstream provider ---
-LLM_PROVIDER=openai
-LLM_API_BASE=https://api.openai.com/v1
-LLM_API_KEY=CHANGEME
-LLM_MODEL_NAME=gpt-4o-mini
-LLM_TIMEOUT=300
-LLM_TEMPERATURE=0
-LLM_TOP_P=1
-LLM_MAX_TOKENS=50000
-LLM_VERBOSE=true
-
-# --- TLS / mTLS (опционально) ---
-# LLM_VERIFY_SSL_CERTS=true
-# LLM_CA_BUNDLE_FILE=
-# LLM_CERT_FILE=
-# LLM_KEY_FILE=
-# LLM_KEY_FILE_PASSWORD=
-
-# --- GigaChat (если LLM_PROVIDER=gigachat) ---
-# LLM_SCOPE=
-# LLM_AUTH_URL=
-
-# --- Queue / priorities ---
-LLM_MAX_CONCURRENT=1
-LLM_QUEUE_MAX_LEN=100
-LLM_PRIORITY_DEFAULT=p2
-LLM_PRIORITY_SLOTS_P1=2
-LLM_PRIORITY_SLOTS_P2=1
-LLM_PRIORITY_SLOTS_P3=1
-
-# --- Cache (обычно достаточно) ---
-LLM_CACHE_ENABLED=true
-# Если LLM_CACHE_PATH не задан, будет использовано: CACHE_CONTAINER_DIR + LLM_CACHE_FILE
-CACHE_CONTAINER_DIR=/home/appuser/app/cache
-# Если LLM_LOG_DIR не задан, будет использовано: /logs
-LLM_LOG_DIR=/logs
-LLM_CACHE_FILE=llm_cache.sqlite
-LLM_CACHE_TTL=600000
-
-# --- Service runtime ---
+# Service
 LOG_LEVEL=INFO
 ENV=development
 TESTING=false
-LLM_PORT=8002
 
-# --- Docker (управляется CLI) ---
-LLM_PROXY_IMAGE=backplane/llm:latest
-# LLM_HOST_PORT=8002
+# Upstream LLM
+LLM_API_BASE=https://api.llm7.io/v1
+LLM_API_KEY=unused
+LLM_MODEL_NAME=deepseek-v3-0324
+LLM_TEMPERATURE=0.0
+LLM_TOP_P=1.0
+LLM_MAX_TOKENS=50000
+LLM_VERBOSE=true
+LLM_TIMEOUT=300.0
 
+# Concurrency / queue
+LLM_MAX_CONCURRENT=1
+LLM_QUEUE_MAX_LEN=100
+LLM_PRIORITY_DEFAULT=p2
+
+# Prefer map-based config (JSON string).
+LLM_PRIORITY_SLOTS={"p1":2,"p2":1,"p3":1}
+
+# Legacy fallback (used only if LLM_PRIORITY_SLOTS is not explicitly set)
+# LLM_PRIORITY_SLOTS_P1=2
+# LLM_PRIORITY_SLOTS_P2=1
+# LLM_PRIORITY_SLOTS_P3=1
+
+# Cache
+LLM_CACHE_ENABLED=true
+LLM_CACHE_TTL=600000
+CACHE_CONTAINER_DIR=/cache
+LLM_CACHE_FILE=llm_cache.sqlite
+# If LLM_CACHE_PATH is explicitly set -> it has priority.
+# LLM_CACHE_PATH=/cache/llm_cache.sqlite
 EOF
 }
 
-ensure_profile_prefilled() {
+compose_env_template() {
   local name="$1"
-  local file
-  file="$(profile_env_path "$name")"
-  if [[ -f "$file" ]]; then
-    return
-  fi
-  mkdir -p "$(dirname "$file")"
-  profile_template > "$file"
+  local cache_root logs_root dumps_root runtime_env
+  cache_root="${PROFILE_CACHE_ROOT}/${name}"
+  logs_root="${PROFILE_LOG_ROOT}/${name}"
+  dumps_root="${PROFILE_DATA_ROOT}/${name}/crash_dumps"
+  runtime_env="$(profile_runtime_env_path "$name")"
 
-  while IFS= read -r d; do
-    mkdir -p "$d"
-  done < <(profile_owned_dirs "$name")
+  cat <<EOF
+# Compose substitution env for profile: ${name}
+
+# Image/build
+LLM_IMAGE=backplane/llm:latest
+LLM_BUILD_CONTEXT=.
+LLM_DOCKERFILE=Dockerfile
+
+# Ports
+LLM_PORT=8002
+
+# Mounts (host)
+CACHE_HOST_DIR=${cache_root}
+LOGS_HOST_DIR=${logs_root}
+DUMP_HOST_DIR=${dumps_root}
+
+# Mounts (container)
+CACHE_CONTAINER_DIR=/cache
+LOGS_CONTAINER_DIR=/logs
+DUMP_CONTAINER_DIR=/crash_dumps
+
+# Runtime env file for the service (absolute path is OK for compose)
+LLM_ENV_FILE=${runtime_env}
+
+# Optional
+LOG_LEVEL=INFO
+EOF
 }
 
 run_editor() {
@@ -196,128 +236,70 @@ run_editor() {
   fi
 }
 
+ensure_profile_prefilled() {
+  local name="$1"
+  local compose_file runtime_file
+
+  compose_file="$(profile_compose_env_path "$name")"
+  runtime_file="$(profile_runtime_env_path "$name")"
+
+  mkdir -p "$(dirname "$compose_file")"
+
+  # owned dirs
+  mkdir -p "${PROFILE_CACHE_ROOT}/${name}" "${PROFILE_LOG_ROOT}/${name}" "${PROFILE_DATA_ROOT}/${name}/crash_dumps"
+
+  if [[ ! -f "$runtime_file" ]]; then
+    runtime_env_template > "$runtime_file"
+  fi
+
+  if [[ ! -f "$compose_file" ]]; then
+    compose_env_template "$name" > "$compose_file"
+  fi
+}
+
 # ---------------------------
-# Docker helpers
+# Docker compose helpers
 # ---------------------------
-docker_available() {
-  command -v docker >/dev/null 2>&1
+docker_available() { command -v docker >/dev/null 2>&1; }
+require_docker() { docker_available || die "docker not found"; }
+
+compose_cmd() {
+  local name="$1"; shift
+  local project_dir compose_env project_name
+  project_dir="$(resolve_project_dir)"
+  compose_env="$(profile_compose_env_path "$name")"
+  [[ -f "$compose_env" ]] || die "profile not found: $name"
+  project_name="${PROG}-${name}"
+
+  require_docker
+  docker compose \
+    --project-directory "$project_dir" \
+    -f "${project_dir}/compose.yaml" \
+    --env-file "$compose_env" \
+    -p "$project_name" \
+    "$@"
 }
 
-require_docker() {
-  docker_available || die "docker not found"
-}
-
-read_env_value() {
-  local key="$1"
-  local file="$2"
-  awk -F= -v k="$key" '
-    $0 ~ "^[[:space:]]*#" {next}
-    $0 ~ "^[[:space:]]*$" {next}
-    $1 == k {sub(/^[^=]*=/,""); print; exit}
-  ' "$file" 2>/dev/null || true
-}
-
-container_name_for_profile() {
+compose_up() {
   local name="$1"
-  echo "${PROG}-${name}"
+  compose_cmd "$name" up -d --build --remove-orphans
+  echo "Started: ${PROG}-${name}"
 }
 
-docker_stop_rm_name_best_effort() {
-  local cname="$1"
-  local notice="${2:-}"
+compose_down_best_effort() {
+  local name="$1"
   docker_available || return 0
-
-  if ! docker ps -a --format '{{.Names}}' | grep -Fxq "$cname"; then
-    return 0
-  fi
-
-  if docker rm -f "$cname" >/dev/null 2>&1; then
-    if [[ -n "$notice" ]]; then
-      echo "${notice}: $cname"
-    fi
-  else
-    warn "не удалось погасить контейнер: $cname (best-effort)"
-  fi
+  compose_cmd "$name" down --remove-orphans >/dev/null 2>&1 || true
 }
 
-docker_stop_profile_best_effort() {
+compose_status() {
   local name="$1"
-  local notice="${2:-}"
-  docker_stop_rm_name_best_effort "$(container_name_for_profile "$name")" "$notice"
+  compose_cmd "$name" ps
 }
 
-docker_stop_all_llm_proxy_containers_best_effort() {
-  docker_available || return 0
-  local cname
-  while IFS= read -r cname; do
-    [[ -n "$cname" ]] || continue
-    docker_stop_rm_name_best_effort "$cname" "Погасили старый контейнер"
-  done < <(docker ps -a --filter "name=^/${PROG}-" --format '{{.Names}}')
-}
-
-docker_start_profile() {
+compose_logs() {
   local name="$1"
-  local env_file image llm_port host_port cache_container_dir cache_root logs_root cname
-
-  env_file="$(profile_env_path "$name")"
-  [[ -f "$env_file" ]] || die "profile not found: $name"
-
-  image="$(read_env_value "LLM_PROXY_IMAGE" "$env_file")"
-  [[ -n "$image" ]] || image="llm-proxy:latest"
-
-  llm_port="$(read_env_value "LLM_PORT" "$env_file")"
-  [[ -n "$llm_port" ]] || llm_port="8002"
-
-  host_port="$(read_env_value "LLM_HOST_PORT" "$env_file")"
-  [[ -n "$host_port" ]] || host_port="$llm_port"
-
-  cache_container_dir="$(read_env_value "CACHE_CONTAINER_DIR" "$env_file")"
-  [[ -n "$cache_container_dir" ]] || cache_container_dir="home/appuser/app/cache"
-
-  log_container_dir="$(read_env_value "LOG_CONTAINER_DIR" "$env_file")"
-  [[ -n "$log_container_dir" ]] || log_container_dir="/logs"
-
-  cname="$(container_name_for_profile "$name")"
-  cache_root="${PROFILE_CACHE_ROOT}/${name}"
-  logs_root="${PROFILE_LOG_ROOT}/${name}"
-
-  mkdir -p "$cache_root" "$logs_root"
-
-  require_docker
-
-  # DX rule: only one llm-proxy container at a time (avoid port conflicts).
-  docker_stop_all_llm_proxy_containers_best_effort
-
-  docker run -d     --name "$cname"     --env-file "$env_file"     -p "${host_port}:${llm_port}"     -v "${cache_root}:${cache_container_dir}"     -v "${logs_root}:/home/appuser/app/logs"     "$image" >/dev/null
-
-  echo "Started: $cname (image=$image, host_port=$host_port -> container_port=$llm_port)"
-}
-
-docker_stop_profile() {
-  local name="$1"
-  local cname
-  cname="$(container_name_for_profile "$name")"
-  require_docker
-  if docker ps -a --format '{{.Names}}' | grep -Fxq "$cname"; then
-    docker_stop_rm_name_best_effort "$cname" "Остановили контейнер"
-  else
-    echo "Контейнер не найден: $cname (ничего не остановлено)"
-  fi
-}
-
-docker_status_profile() {
-  local name="$1"
-  local cname
-  cname="$(container_name_for_profile "$name")"
-  require_docker
-  if docker ps --format '{{.Names}}' | grep -Fxq "$cname"; then
-    echo "running: $cname"
-    docker ps --filter "name=^/${cname}$" --format '  {{.Names}}  {{.Image}}  {{.Ports}}'
-  elif docker ps -a --format '{{.Names}}' | grep -Fxq "$cname"; then
-    echo "stopped: $cname"
-  else
-    echo "not created: $cname"
-  fi
+  compose_cmd "$name" logs -f --tail=200
 }
 
 # ---------------------------
@@ -341,36 +323,34 @@ confirm() {
 
 usage() {
   cat <<EOF
-$PROG — manage LLM Proxy profiles and docker runtime
+$PROG — manage llm-proxy profiles and docker compose runtime
 
 Usage:
   $PROG help
   $PROG list
   $PROG active
+  $PROG init [name]          # create + use + open editor for runtime env (first-run friendly)
   $PROG create <name>
-  $PROG edit [name]
   $PROG use <name>
-  $PROG start [name]
-  $PROG stop [name]
+  $PROG edit [name]          # edit runtime env (<name>.llm.env)
+  $PROG edit-compose [name]  # edit compose env (<name>.env)
+  $PROG up [name]            # start active or provided profile (compose up -d --build)
+  $PROG down [name]          # stop active or provided profile (compose down)
   $PROG status [name]
+  $PROG logs [name]
   $PROG delete <name> [--yes]
 
-User install (no sudo):
-  $PROG install
-  $PROG uninstall
-  $PROG reinstall
+Optional:
+  $PROG install|uninstall|reinstall
+
+Project directory:
+  - Run from repo root (where compose.yaml is), OR set:
+      LLM_PROXY_PROJECT_DIR=/path/to/repo
 
 Examples:
-  $PROG create openrouter  # создать профиль
-  $PROG edit openrouter    # редактировать
-  $PROG use openrouter     # сделать активным (остановит старый контейнер, если он был активным)
-  $PROG start              # запустить активный профиль (перед запуском остановит все llm-proxy-* контейнеры)
-  $PROG start llm7         # переключиться на профиль и запустить (аналог: use+start)
-
-Notes:
-  - По умолчанию редактор на macOS: TextEdit.
-    Можно переопределить: LLM_PROXY_EDITOR="code --wait" или EDITOR="open -e"
-  - На macOS PATH часто задаётся в login-shell файлах: ~/.zprofile или ~/.bash_profile
+  $PROG init default
+  $PROG up
+  $PROG logs
 EOF
 }
 
@@ -456,11 +436,6 @@ main() {
   local cmd="${1:-help}"
   shift || true
 
-  if [[ "$cmd" == "profile" || "$cmd" == "profiles" ]]; then
-    cmd="${1:-help}"
-    shift || true
-  fi
-
   case "$cmd" in
     help|-h|--help) usage ;;
     list|ls) list_profiles ;;
@@ -468,18 +443,20 @@ main() {
       local a; a="$(get_active_profile)"
       [[ -n "$a" ]] && echo "$a" || die "no active profile (use: $PROG use <name>)"
       ;;
+    init)
+      local name="${1:-default}"
+      name="$(sanitize_profile_name "$name")" || die "invalid profile name (use letters/digits/._-)"
+      ensure_profile_prefilled "$name"
+      set_active_profile "$name"
+      echo "Active: $name"
+      echo "Opening runtime env: $(profile_runtime_env_path "$name")"
+      run_editor "$(profile_runtime_env_path "$name")"
+      ;;
     create)
       local name="${1:-}"; [[ -n "$name" ]] || die "usage: $PROG create <name>"
       name="$(sanitize_profile_name "$name")" || die "invalid profile name (use letters/digits/._-)"
-      ensure_profile_prefilled "$name"; echo "Created: $name"
-      ;;
-    edit)
-      local name="${1:-}"
-      if [[ -z "$name" ]]; then
-        name="$(get_active_profile)"; [[ -n "$name" ]] || die "no active profile; use: $PROG edit <name> or $PROG use <name>"
-      fi
-      name="$(sanitize_profile_name "$name")" || die "invalid profile name (use letters/digits/._-)"
-      ensure_profile_prefilled "$name"; run_editor "$(profile_env_path "$name")"
+      ensure_profile_prefilled "$name"
+      echo "Created: $name"
       ;;
     use|switch)
       local name="${1:-}"; [[ -n "$name" ]] || die "usage: $PROG use <name>"
@@ -492,15 +469,33 @@ main() {
         exit 0
       fi
 
-      # DX rule: if switching profiles, stop old active container (best-effort).
+      # stop previous active (best-effort)
       if [[ -n "$current" ]]; then
-        docker_stop_profile_best_effort "$current" "Погасили контейнер активного профиля перед переключением"
+        compose_down_best_effort "$current"
       fi
 
       set_active_profile "$name"
       echo "Active: $name"
       ;;
-    start|up|run)
+    edit)
+      local name="${1:-}"
+      if [[ -z "$name" ]]; then
+        name="$(get_active_profile)"; [[ -n "$name" ]] || die "no active profile; use: $PROG edit <name> or $PROG use <name>"
+      fi
+      name="$(sanitize_profile_name "$name")" || die "invalid profile name (use letters/digits/._-)"
+      ensure_profile_prefilled "$name"
+      run_editor "$(profile_runtime_env_path "$name")"
+      ;;
+    edit-compose)
+      local name="${1:-}"
+      if [[ -z "$name" ]]; then
+        name="$(get_active_profile)"; [[ -n "$name" ]] || die "no active profile; use: $PROG edit-compose <name>"
+      fi
+      name="$(sanitize_profile_name "$name")" || die "invalid profile name (use letters/digits/._-)"
+      ensure_profile_prefilled "$name"
+      run_editor "$(profile_compose_env_path "$name")"
+      ;;
+    up|start|run)
       local requested="${1:-}"
       local current; current="$(get_active_profile)"
       local name
@@ -509,7 +504,7 @@ main() {
         name="$(sanitize_profile_name "$requested")" || die "invalid profile name (use letters/digits/._-)"
         ensure_profile_prefilled "$name"
         if [[ -n "$current" && "$current" != "$name" ]]; then
-          docker_stop_profile_best_effort "$current" "Погасили контейнер предыдущего профиля перед запуском нового"
+          compose_down_best_effort "$current"
         fi
         set_active_profile "$name"
       else
@@ -517,16 +512,16 @@ main() {
         [[ -n "$name" ]] || die "no active profile; use: $PROG use <name>"
       fi
 
-      docker_start_profile "$name"
+      compose_up "$name"
       ;;
-    stop|down)
+    down|stop)
       local name="${1:-}"
       if [[ -z "$name" ]]; then
-        name="$(get_active_profile)"; [[ -n "$name" ]] || die "no active profile; use: $PROG stop <name>"
+        name="$(get_active_profile)"; [[ -n "$name" ]] || die "no active profile; use: $PROG down <name>"
       else
         name="$(sanitize_profile_name "$name")" || die "invalid profile name (use letters/digits/._-)"
       fi
-      docker_stop_profile "$name"
+      compose_cmd "$name" down --remove-orphans
       ;;
     status)
       local name="${1:-}"
@@ -535,7 +530,16 @@ main() {
       else
         name="$(sanitize_profile_name "$name")" || die "invalid profile name (use letters/digits/._-)"
       fi
-      docker_status_profile "$name"
+      compose_status "$name"
+      ;;
+    logs)
+      local name="${1:-}"
+      if [[ -z "$name" ]]; then
+        name="$(get_active_profile)"; [[ -n "$name" ]] || die "no active profile; use: $PROG logs <name>"
+      else
+        name="$(sanitize_profile_name "$name")" || die "invalid profile name (use letters/digits/._-)"
+      fi
+      compose_logs "$name"
       ;;
     delete|rm|remove)
       local name="${1:-}"; [[ -n "$name" ]] || die "usage: $PROG delete <name> [--yes]"
@@ -544,23 +548,24 @@ main() {
       [[ "${1:-}" == "--yes" || "${1:-}" == "-y" ]] && assume_yes="1"
 
       name="$(sanitize_profile_name "$name")" || die "invalid profile name (use letters/digits/._-)"
-      local env_file; env_file="$(profile_env_path "$name")"
-      [[ -f "$env_file" ]] || die "profile not found: $name"
+      local compose_file runtime_file
+      compose_file="$(profile_compose_env_path "$name")"
+      runtime_file="$(profile_runtime_env_path "$name")"
+      [[ -f "$compose_file" || -f "$runtime_file" ]] || die "profile not found: $name"
 
-      if ! confirm "Delete profile '$name' and its profile-owned data (logs/cache)?" "$assume_yes"; then
+      if ! confirm "Delete profile '$name' and its profile-owned data (logs/cache/dumps)?" "$assume_yes"; then
         echo "Cancelled."; exit 0
       fi
 
       local active; active="$(get_active_profile)"
+      compose_down_best_effort "$name"
+
       if [[ "$active" == "$name" ]]; then
-        docker_stop_profile_best_effort "$name"
         clear_active_profile
-      else
-        docker_stop_profile_best_effort "$name"
       fi
 
-      rm -f "$env_file"
-      while IFS= read -r d; do [[ -d "$d" ]] && rm -rf "$d"; done < <(profile_owned_dirs "$name")
+      rm -f "$compose_file" "$runtime_file"
+      rm -rf "${PROFILE_CACHE_ROOT:?}/${name}" "${PROFILE_LOG_ROOT:?}/${name}" "${PROFILE_DATA_ROOT:?}/${name}"
       echo "Deleted: $name"
       ;;
     install) cmd_install ;;
