@@ -1,11 +1,15 @@
-.PHONY: lint fmt test docker-build docker-run
+.PHONY: lint fmt test docker-build docker-run lint-ruff lint-pyright
 
 PYTHON ?= python
 PORT ?= 8022
 IMAGE ?= llm-proxy:dev
 
-lint:
+lint: lint-ruff lint-pyright
+
+lint-ruff:
 	$(PYTHON) -m ruff check src tests
+
+lint-pyright:
 	pyright
 
 ruff-fix:
