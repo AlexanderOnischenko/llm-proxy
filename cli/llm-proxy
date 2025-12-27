@@ -190,7 +190,7 @@ compose_env_template() {
 # Compose substitution env for profile: ${name}
 
 # Image/build
-LLM_IMAGE=backplane/llm:latest
+LLM_IMAGE=llm-proxy:latest
 LLM_BUILD_CONTEXT=.
 LLM_DOCKERFILE=Dockerfile
 

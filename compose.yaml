@@ -1,6 +1,6 @@
 services:
   llm:
-    image: ${LLM_IMAGE:-backplane/llm:latest}
+    image: ${LLM_IMAGE:-llm-proxy:latest}
 
     build:
       context: ${LLM_BUILD_CONTEXT:-.}
