@@ -7,7 +7,6 @@ import types
 from typing import Any, cast
 
 
-
 def _ensure_package(name: str) -> types.ModuleType:
     if name in sys.modules:
         return sys.modules[name]

@@ -1,10 +1,11 @@
 # src/deps.py
-from llm.config.settings import Settings, get_settings
 from fastapi import Depends
-from llm.services.client import CachedQueuedChatOpenAI, create_custom_llm
-from llm.services.chat_provider import OpenAIChatProvider
-from llm.services.priority_queue import PriorityChatQueue
+
+from llm.config.settings import Settings, get_settings
 from llm.services.cache import SQLiteCache
+from llm.services.chat_provider import OpenAIChatProvider
+from llm.services.client import CachedQueuedChatOpenAI, create_custom_llm
+from llm.services.priority_queue import PriorityChatQueue
 
 _llm_instance: CachedQueuedChatOpenAI | None = None
 _chat_provider: OpenAIChatProvider | None = None

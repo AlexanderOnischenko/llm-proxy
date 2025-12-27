@@ -1,21 +1,20 @@
 # app/routers/llm.py
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
-from fastapi.responses import JSONResponse
-from fastapi.encoders import jsonable_encoder
-from openai import OpenAIError
-
-import re
 import inspect
+import re
 from typing import Any, List
 from uuid import uuid4
 
-
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse
+from langchain_core.messages import AIMessage as SchemaAI
 from langchain_core.messages import BaseMessage as SchemaBase
 from langchain_core.messages import HumanMessage as SchemaHuman
-from langchain_core.messages import AIMessage as SchemaAI
 from langchain_core.messages import SystemMessage as SchemaSystem
 from langchain_core.outputs import LLMResult
+from openai import OpenAIError
 from pydantic import ValidationError
+from shared_pkg.utils.logging_config import get_logger
 
 from llm.deps import (
     CachedQueuedChatOpenAI,
@@ -24,10 +23,9 @@ from llm.deps import (
     get_settings,
 )
 from llm.models.chat import ChatCompletionRequest, ChatMessage
-from llm.services.priority_queue import PriorityChatQueue, ProviderError, QueueOverflowError, QueueResult
 from llm.models.llm import LLMRequest
 from llm.routers.chat import _humanize_validation_error
-from shared_pkg.utils.logging_config import get_logger
+from llm.services.priority_queue import PriorityChatQueue, ProviderError, QueueOverflowError, QueueResult
 
 logger = get_logger(__name__)
 

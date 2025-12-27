@@ -4,8 +4,9 @@ from __future__ import annotations
 from typing import Any
 
 from openai import AsyncOpenAI, OpenAIError
-from llm.config.settings import Settings
 from shared_pkg.utils.logging_config import get_logger
+
+from llm.config.settings import Settings
 from llm.models.chat import ChatCompletionRequest
 from llm.services.cache import SQLiteCache, make_key
 
