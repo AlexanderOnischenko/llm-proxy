@@ -1,7 +1,7 @@
 .PHONY: lint fmt test docker-build docker-run
 
 PYTHON ?= python
-PORT ?= 8002
+PORT ?= 8022
 IMAGE ?= llm-proxy:dev
 
 lint:
@@ -18,7 +18,7 @@ build:
 	docker build -t $(IMAGE) .
 
 up:
-	docker run --rm -p $(PORT):$(PORT) --env-file .env -e LLM_PORT=$(PORT) $(IMAGE)
+	docker run --rm -p $(PORT):$(PORT) -e LLM_PORT=$(PORT) $(IMAGE)
 
 reqs:
 	pip install -r requirements.txt
