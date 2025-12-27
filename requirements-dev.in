@@ -6,3 +6,4 @@ httpx  # для тестов (если мокаете запросы)
 ruff
 pyright
 pip-tools
+debugpy

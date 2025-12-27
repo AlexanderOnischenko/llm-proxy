@@ -28,7 +28,9 @@ logs/
 cache/
 
 # IDE
-.vscode/
+.vscode/*
+!.vscode/launch.json
+!.vscode/settings.json
 .idea/
 
 # OS

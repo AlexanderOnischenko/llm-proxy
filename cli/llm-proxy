@@ -75,6 +75,76 @@ ensure_dirs() {
            "$PROFILE_DATA_ROOT" "$PROFILE_LOG_ROOT" "$PROFILE_CACHE_ROOT"
 }
 
+# Reads a KEY from env-file (KEY=VALUE), strips quotes if any.
+envfile_get() {
+  local file="$1" key="$2"
+  local line
+  line="$(grep -E "^[[:space:]]*${key}=" "$file" | tail -n1 || true)"
+  [[ -n "$line" ]] || return 1
+  line="${line#*=}"
+  line="${line%$'\r'}"
+  # strip optional quotes
+  line="${line%\"}"; line="${line#\"}"
+  line="${line%\'}"; line="${line#\'}"
+  printf '%s' "$line"
+}
+
+derive_debug_image() {
+  local base="$1"
+  local repo tag
+  if [[ "$base" == *:* ]]; then
+    repo="${base%:*}"
+    tag="${base##*:}"
+  else
+    repo="$base"
+    tag="latest"
+  fi
+  echo "${repo}:${tag}-debug"
+}
+
+# Resolve the effective image name as docker compose sees it (including ${VAR:-default} fallbacks).
+# This avoids requiring LLM_IMAGE to be present in the profile env file.
+resolve_compose_image() {
+  local project_dir="$1" compose_env="$2" service="$3" override="$4"
+
+  local args=()
+  args+=(-f "${project_dir}/compose.yaml")
+  [[ -n "$override" ]] && args+=(-f "$override")
+
+  docker compose \
+    --project-directory "$project_dir" \
+    "${args[@]}" \
+    --env-file "$compose_env" \
+    config \
+  | awk -v svc="$service" '
+      $1=="services:" {in_services=1; next}
+      in_services && $0 ~ /^[[:space:]]{2}[A-Za-z0-9_.-]+:[[:space:]]*$/ {
+        line=$0
+        sub(/^[[:space:]]+/, "", line)
+        sub(/:[[:space:]]*$/, "", line)
+        in_target = (line == svc)
+        next
+      }
+      in_target && $1=="image:" {print $2; exit}
+    '
+}
+
+# Source-of-truth for base image:
+# 1) if profile env explicitly defines LLM_IMAGE, use it
+# 2) otherwise ask docker compose to resolve defaults and return the final image value
+resolve_base_image() {
+  local project_dir="$1" compose_env="$2" service="$3" override="$4"
+  local base=""
+  base="$(envfile_get "$compose_env" "LLM_IMAGE" 2>/dev/null || true)"
+  if [[ -n "$base" ]]; then
+    echo "$base"
+    return 0
+  fi
+  base="$(resolve_compose_image "$project_dir" "$compose_env" "$service" "$override" || true)"
+  [[ -n "$base" ]] || return 1
+  echo "$base"
+}
+
 sanitize_profile_name() {
   local name="${1:-}"
   [[ -n "$name" ]] || return 1
@@ -326,6 +396,22 @@ ensure_profile_prefilled() {
   fi
 }
 
+ensure_base_image() {
+  local name="$1" project_dir="$2" compose_env="$3" service="$4"
+
+  local base_image
+  base_image="$(resolve_base_image "$project_dir" "$compose_env" "$service" "$(compose_override_path "$name")")" \
+    || die "cannot resolve base image (set LLM_IMAGE in $compose_env or ensure compose.yaml has an image default)"
+
+  if docker image inspect "$base_image" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  echo "Base image not found: $base_image"
+  echo "Building base image via compose..."
+  compose_cmd "$name" build "$service"
+} 
+
 # ---------------------------
 # Docker compose helpers (ironclad env injection via override file)
 # ---------------------------
@@ -393,20 +479,72 @@ compose_cmd() {
     "$@"
 }
 
+compose_cmd_debug() {
+  local name="$1"; shift || true
+  validate_runtime_env_or_die "$name"
+
+  [[ $# -gt 0 ]] || die "compose subcommand required (e.g. up -d)"
+
+  local project_dir compose_env project_name override debug_file base_compose service
+  project_dir="$(resolve_project_dir)"
+  compose_env="$(profile_compose_env_path "$name")"
+  [[ -f "$compose_env" ]] || die "profile not found: $name"
+  project_name="${PROG}-${name}"
+
+  base_compose="${project_dir}/compose.yaml"
+  service="$(detect_compose_service_name "$base_compose")"
+  [[ -n "$service" ]] || die "cannot detect service name from $base_compose (set LLM_PROXY_SERVICE)"
+
+  write_compose_override "$name"
+  override="$(compose_override_path "$name")"
+
+  debug_file="${project_dir}/compose-debug.yaml"
+  [[ -f "$debug_file" ]] || die "compose-debug.yaml not found in project dir: $project_dir"
+
+  require_docker
+
+  local base_image debug_image
+  base_image="$(resolve_base_image "$project_dir" "$compose_env" "$service" "$override")" \
+    || die "cannot resolve base image (set LLM_IMAGE in $compose_env or ensure compose.yaml has an image default)"
+  export LLM_BASE_IMAGE="$base_image"
+  debug_image="$(derive_debug_image "$base_image")"
+
+  ensure_base_image "$name" "$project_dir" "$compose_env" "$service"
+
+  # Ключевой момент: прокидываем LLM_DEBUG_IMAGE только на debug-запуск
+  LLM_DEBUG_IMAGE="$debug_image" docker compose \
+    --project-directory "$project_dir" \
+    -f "${project_dir}/compose.yaml" \
+    -f "$override" \
+    -f "$debug_file" \
+    --env-file "$compose_env" \
+    -p "$project_name" \
+    "$@"
+}
+
+
 compose_up() {
   local name="$1"
   compose_cmd "$name" up -d --build --remove-orphans
   echo "Started: ${PROG}-${name}"
 }
 
+compose_debug() {
+  local name="$1"
+  compose_cmd_debug "$name" up -d --build --remove-orphans
+  echo "Started: Debug ${PROG}-${name}"
+}
+
 compose_down_best_effort() {
   local name="$1"
+  validate_runtime_env_or_die "$name"
   docker_available || return 0
   compose_cmd "$name" down --remove-orphans >/dev/null 2>&1 || true
 }
 
 compose_status() {
   local name="$1"
+  validate_runtime_env_or_die "$name"
   compose_cmd "$name" ps
 }
 
@@ -448,6 +586,7 @@ Usage:
   $PROG edit [name]          # edit runtime env (<name>.llm.env)
   $PROG edit-compose [name]  # edit compose env (<name>.env)
   $PROG up [name]            # start active or provided profile (compose up -d --build)
+  $PROG debug [name]         # start in debug mode (compose-debug.yaml + debugpy attach)
   $PROG down [name]          # stop active or provided profile (compose down)
   $PROG status [name]
   $PROG logs [name]
@@ -643,6 +782,25 @@ main() {
       fi
 
       compose_up "$name"
+      ;;
+    debug)
+      local requested="${1:-}"
+      local current; current="$(get_active_profile)"
+      local name
+
+      if [[ -n "$requested" ]]; then
+        name="$(sanitize_profile_name "$requested")" || die "invalid profile name (use letters/digits/._-)"
+        ensure_profile_prefilled "$name"
+        if [[ -n "$current" && "$current" != "$name" ]]; then
+          compose_down_best_effort "$current"
+        fi
+        set_active_profile "$name"
+      else
+        name="$current"
+        [[ -n "$name" ]] || die "no active profile; use: $PROG use <name>"
+      fi
+
+      compose_debug "$name"
       ;;
     down|stop)
       local name="${1:-}"

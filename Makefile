@@ -2,7 +2,7 @@ SHELL := /usr/bin/env bash
 .SHELLFLAGS := -euo pipefail -c
 
 .PHONY: help lint lint-ruff lint-pyright ruff-fix fmt test reqs dev-reqs \
-        build up up-profile down restart logs status ps \
+        build up up-profile debug down restart logs status ps \
         profiles active create use switch edit \
         port doctor smoke smoke-chat smoke-llm load
 
@@ -21,12 +21,9 @@ endif
 PORT ?= 8002
 
 # Detect profile dir (XDG)
-# Detect profile dir via CLI (handles XDG + legacy ~/.llm-proxy consistently)
-PROFILE_DIR := $(shell $(CLI) paths profiles_dir 2>/dev/null || \
-  ( if [ -n "$$XDG_CONFIG_HOME" ]; then echo "$$XDG_CONFIG_HOME/llm-proxy/profiles"; else echo "$$HOME/.config/llm-proxy/profiles"; fi ) )
-
-COMPOSE_ENV := $(shell $(CLI) paths compose_env "$(PROFILE)" 2>/dev/null || echo "$(PROFILE_DIR)/$(PROFILE).env")
-RUNTIME_ENV := $(shell $(CLI) paths runtime_env "$(PROFILE)" 2>/dev/null || echo "$(PROFILE_DIR)/$(PROFILE).llm.env")
+PROFILE_DIR := $(shell if [ -n "$$XDG_CONFIG_HOME" ]; then echo "$$XDG_CONFIG_HOME/llm-proxy/profiles"; else echo "$$HOME/.config/llm-proxy/profiles"; fi)
+COMPOSE_ENV := $(PROFILE_DIR)/$(PROFILE).env
+RUNTIME_ENV := $(PROFILE_DIR)/$(PROFILE).llm.env
 
 # Read LLM_PORT from profile compose env if present; fallback to PORT var.
 PORT_FROM_PROFILE := $(shell if [ -f "$(COMPOSE_ENV)" ]; then grep -E '^LLM_PORT=' "$(COMPOSE_ENV)" | tail -n1 | cut -d= -f2; fi)
@@ -49,7 +46,7 @@ BLU   := \033[34m
 CYN   := \033[36m
 
 define HR
-	@printf "$(DIM)────────────────────────────────────────────────────────$(RESET)\n"
+	@printf "$(DIM)─────────────────────────────────────────────────────────────────────────────$(RESET)\n"
 endef
 
 define TITLE
@@ -95,6 +92,7 @@ help:
 	@printf "  make smoke\n"
 	@printf "  CONCURRENCY=30 REQUESTS=300 make load\n"
 	$(call HR)
+
 
 # -----------------------
 # Python quality targets
@@ -171,7 +169,6 @@ cli-reinstall: cli-uninstall cli-install
 cli-where:
 	@echo "Expected: $(CLI_BIN)"
 	@command -v llm-proxy >/dev/null 2>&1 && echo "which llm-proxy: $$(command -v llm-proxy)" || echo "which llm-proxy: NOT FOUND"
-	@printf "\n"
 	@echo "PATH: $$PATH"
 	@if ! echo "$$PATH" | tr ':' '\n' | grep -Fxq "$(BINDIR)"; then \
 		echo "WARNING: $(BINDIR) is not in PATH. Add this to your shell rc:"; \
@@ -256,6 +253,12 @@ up-profile: use
 	$(CLI) up "$(PROFILE)"
 	$(call OK,Запущено)
 
+debug:
+	$(call TITLE,Debug (debugpy + attach))
+	$(call KV,Profile:, $(PROFILE))
+	$(call HR)
+	$(CLI) debug "$(PROFILE)"
+
 down:
 	$(call TITLE,Остановка сервиса)
 	$(call KV,Profile:, $(PROFILE))
@@ -296,13 +299,6 @@ doctor:
 	$(call KV,Profile:, $(PROFILE))
 	$(call KV,BASE_URL:, $(BASE_URL))
 	$(call KV,Port:, $(EFFECTIVE_PORT))
-	@printf "ℹ LLM_ENV_FILE в compose env: "; \
-	if [ -f "$(COMPOSE_ENV)" ]; then \
-	  v=$$(grep -E '^LLM_ENV_FILE=' "$(COMPOSE_ENV)" || true); \
-	  if [ -n "$$v" ]; then printf "%s\n" "$$v"; else printf "MISSING\n"; fi; \
-	else \
-	  printf "NO COMPOSE_ENV\n"; \
-	fi	
 	$(call HR)
 	$(call INFO,Кто держит порт $(EFFECTIVE_PORT):)
 	@docker ps --format "{{.Names}} {{.Image}} {{.Ports}}" | grep -E "0.0.0.0:$(EFFECTIVE_PORT)->|:::$(EFFECTIVE_PORT)->" || true
