@@ -6,10 +6,6 @@ services:
       context: ${LLM_BUILD_CONTEXT:-.}
       dockerfile: ${LLM_DOCKERFILE:-Dockerfile}
 
-    # Runtime-конфиг приложения (ключи, провайдер, модель и т.п.)
-    env_file:
-      - ${LLM_ENV_FILE}
-
     environment:
       # Порт: и LLM_PORT (твой), и PORT (на всякий случай для платформ)
       - LLM_PORT=${LLM_PORT}
