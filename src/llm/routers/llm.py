@@ -11,7 +11,7 @@ from langchain_core.messages import AIMessage as SchemaAI
 from langchain_core.messages import BaseMessage as SchemaBase
 from langchain_core.messages import HumanMessage as SchemaHuman
 from langchain_core.messages import SystemMessage as SchemaSystem
-from langchain_core.outputs import LLMResult
+from langchain_core.outputs import ChatGeneration, LLMResult
 from openai import OpenAIError
 from pydantic import ValidationError
 
@@ -141,6 +141,56 @@ def _build_chat_request(
         stop=stop,
     )
 
+def _chat_completion_to_llm_result(body: dict[str, Any]) -> LLMResult:
+    """Back-compat adapter: provider chat-completion dict -> LangChain LLMResult.
+
+    Some legacy callers of POST /llm validate the response as LangChain LLMResult
+    (expects `generations`). The queued chat path returns an OpenAI-style
+    chat.completion dict. Convert it while keeping the raw response in llm_output.
+    """
+    choices = body.get("choices") if isinstance(body, dict) else None
+    if not isinstance(choices, list):
+        choices = []
+
+    gens: list[ChatGeneration] = []
+    for ch in choices:
+        if not isinstance(ch, dict):
+            continue
+        msg = ch.get("message")
+        msg = msg if isinstance(msg, dict) else {}
+        content = msg.get("content")
+
+        if isinstance(content, str):
+            text = content
+            ai_content = content
+        elif content is None:
+            text = ""
+            ai_content = ""
+        else:
+            text = str(content)
+            ai_content = content
+
+        # SchemaAI(content=...) expects already validated content
+        ai = SchemaAI(content=_validate_message_content(ai_content))
+
+        info: dict[str, Any] = {}
+        if ch.get("finish_reason") is not None:
+            info["finish_reason"] = ch.get("finish_reason")
+        if ch.get("index") is not None:
+            info["index"] = ch.get("index")
+
+        gens.append(ChatGeneration(message=ai, text=text, generation_info=(info or None)))
+
+    if not gens:
+        gens = [ChatGeneration(message=SchemaAI(content=""), text="")]
+
+    llm_output: dict[str, Any] = {"raw": body}
+    for k in ("id", "model", "usage"):
+        if isinstance(body, dict) and k in body:
+            llm_output[k] = body[k]
+
+    return LLMResult(generations=[gens], llm_output=llm_output)
+
 
 @router.post("/llm", response_class=JSONResponse)
 async def call_llm(
@@ -156,7 +206,22 @@ async def call_llm(
     safe = {
         k: v
         for k, v in req.kwargs.items()
-        if k in ("input", "prompt", "messages", "stop", "callbacks", "tags", "metadata", "run_manager")
+        if k in (
+            "input",
+            "prompt",
+            "messages",
+            "stop",
+            "callbacks",
+            "tags",
+            "metadata",
+            "run_manager",
+            # chat knobs (back-compat)
+            "model",
+            "temperature",
+            "top_p",
+            "max_tokens",
+            "stream",
+        )
     }
     # 2) Если есть сырой список dict в messages — превращаем его в правильные объекты
     if "messages" in safe:
@@ -164,7 +229,13 @@ async def call_llm(
         norm_msgs: List[SchemaBase] = []
         for m in messages:
             if isinstance(m, dict):
-                t = m.get("type", "system")
+                # Support both OpenAI-style role and legacy/LangChain-style type
+                t = (m.get("role") or m.get("type") or "system")
+                t = str(t).lower()
+                if t == "human":
+                    t = "user"
+                elif t == "ai":
+                    t = "assistant"
                 c = _validate_message_content(m.get("content"))
                 if t == "system":
                     norm_msgs.append(SchemaSystem(content=c))
@@ -180,33 +251,40 @@ async def call_llm(
                 raise HTTPException(400, f"Invalid message element: {m!r}")
         safe["messages"] = norm_msgs
 
-    # 3) Remap invoke → generate если передали messages
-    method_name = req.method
-    if method_name == "invoke" and "messages" in safe:
-        method_name = "generate"
-        #req.args.append('method_name="invoke"')
-        logger.info(" ↳ remapping invoke → generate because messages were provided")
+    # ---- Chat compatibility branch ----
+    # If payload includes `messages`, /llm must behave as a legacy chat gateway
+    # and route through the chat priority queue. Do NOT probe llm capabilities
+    # via hasattr()/getattr(): wrapper blocks provider helpers on purpose and
+    # hasattr() triggers __getattr__.
+    is_chat = "messages" in safe
+    if is_chat:
+        # Preserve legacy error semantics: unknown method returns "a{method}"
+        if req.method not in {"generate", "invoke"}:
+            raise HTTPException(400, detail=f"Unknown LLM method: a{req.method}")
 
-    method_name = "a"+method_name
-
-    if not hasattr(llm, method_name):
-        raise HTTPException(400, f"Unknown LLM method: {method_name}")
-
-    if "messages" in safe:
         request_id = _generate_request_id()
         try:
             priority_value = _parse_priority(priority, queue)
+
+            # Build canonical ChatCompletionRequest from LangChain messages
+            # (safe["messages"] уже List[SchemaBase]).
             chat_request = _build_chat_request(
                 messages=safe["messages"],
-                model=req.kwargs.get("model"),
-                temperature=req.kwargs.get("temperature"),
-                top_p=req.kwargs.get("top_p"),
-                max_tokens=req.kwargs.get("max_tokens"),
-                stop=req.kwargs.get("stop"),
+                model=safe.get("model"),
+                temperature=safe.get("temperature"),
+                top_p=safe.get("top_p"),
+                max_tokens=safe.get("max_tokens"),
+                stop=safe.get("stop"),
             )
-            if req.kwargs.get("stream"):
+            if bool(safe.get("stream", False)):
                 raise HTTPException(400, "Streaming is not supported for this endpoint")
-            queue_result = await queue.enqueue(request_id, priority_value, chat_request, endpoint="/llm")
+
+            queue_result = await queue.enqueue(
+                request_id,
+                priority_value,
+                chat_request,
+                endpoint="/llm",
+            )
         except HTTPException as exc:
             detail = exc.detail if getattr(exc, "detail", None) else str(exc)
             return _error_response(exc.status_code, "invalid_request", str(detail), request_id)
@@ -222,9 +300,20 @@ async def call_llm(
             logger.exception("Internal error for request %s at /llm", request_id)
             return _error_response(500, "internal", str(exc), request_id)
 
-        return JSONResponse(content=queue_result.response_body, headers=_metrics_headers(queue_result, request_id))
+        # Back-compat: /llm chat path returns LLMResult-shape (generations=...)
+        llm_result = _chat_completion_to_llm_result(queue_result.response_body)
+        return JSONResponse(
+            content=jsonable_encoder(llm_result.model_dump()),
+            headers=_metrics_headers(queue_result, request_id),
+        )
 
-    fn = getattr(llm, method_name)
+    # ---- Legacy RPC branch (non-chat) ----
+    method_name = req.method
+    async_method_name = "a" + method_name
+    if not hasattr(llm, async_method_name):
+        raise HTTPException(400, detail=f"Unknown LLM method: {async_method_name}")
+
+    fn = getattr(llm, async_method_name)
 
     # 4) Оставляем только параметры, которые ждёт fn
     sig = inspect.signature(fn)

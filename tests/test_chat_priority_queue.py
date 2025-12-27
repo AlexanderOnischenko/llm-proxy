@@ -3,6 +3,7 @@ from typing import Any
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from langchain_core.outputs import LLMResult
 
 pytestmark = pytest.mark.anyio
 
@@ -78,6 +79,39 @@ class SlowProvider(StubProvider):
 class DummyLLM:
     async def agenerate(self, *args, **kwargs):  # pragma: no cover
         raise AssertionError("Dummy LLM should not be invoked in tests")
+    
+class BlockingLLM:
+    """Эмулирует wrapper, который скрывает provider helpers через __getattr__.
+
+    Если /llm снова начнет делать hasattr(llm, "agenerate") ДО enqueue,
+    этот тест поймает регрессию (вернётся 400 вместо 200).
+    """
+
+    def __init__(self) -> None:
+        self.missing_lookups: list[str] = []
+
+    def __getattr__(self, name: str):
+        self.missing_lookups.append(name)
+        if name in {"agenerate", "acomplete", "abatch"}:
+            raise AttributeError(name)
+        raise AssertionError(f"/llm chat path must not touch llm.{name}")
+
+
+class LegacyLLM:
+    """Stub для non-chat ветки /llm (prompt/input)."""
+
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+
+    async def agenerate(self, prompt: str | None = None, **kwargs: Any):
+        if prompt is not None:
+            self.prompts.append(prompt)
+
+        class _Result:
+            def model_dump(self) -> dict[str, Any]:
+                return {"generations": [[{"text": "ok"}]]}
+
+        return _Result()
 
 
 @pytest.fixture(autouse=True)
@@ -175,6 +209,114 @@ async def test_llm_unknown_method_with_messages_rejected(client, make_queue):
     assert response.status_code == 400
     payload = response.json()
     assert payload["detail"] == "Unknown LLM method: abogus"
+
+
+@pytest.mark.parametrize(
+    "messages",
+    [
+        [{"role": "user", "content": "hi"}],   # OpenAI-style
+        [{"type": "human", "content": "hi"}],  # legacy-style
+    ],
+)
+async def test_llm_chat_returns_llmresult_and_preserves_chat_params(client, make_queue, messages):
+    provider = StubProvider(reply="ok")
+    app.dependency_overrides[get_chat_queue] = lambda: make_queue(provider)
+    app.dependency_overrides[get_llm] = lambda: DummyLLM()
+
+    resp = await client.post(
+        "/llm",
+        json={
+            "method": "generate",
+            "kwargs": {
+                "model": "gpt-4o-mini",
+                "temperature": 0.1,
+                "messages": messages,
+            },
+        },
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+
+    # Hard back-compat: must validate as LangChain LLMResult (generations required).
+    LLMResult.model_validate(body)
+    assert body["generations"][0][0]["text"] == "ok"
+
+    # Ensure chat knobs weren't silently dropped.
+    assert provider.seen_payloads[-1]["model"] == "gpt-4o-mini"
+    assert provider.seen_payloads[-1]["temperature"] == 0.1
+
+    # Metrics headers for /llm chat path should be present.
+    assert resp.headers["x-llm-proxy-request-id"].startswith("r_")
+    assert resp.headers["x-llm-proxy-priority"] == "p2"
+
+
+@pytest.mark.parametrize(
+    "method,messages,expected_text",
+    [
+        ("generate", [{"role": "user", "content": "hi"}], "hi"),
+        ("invoke",   [{"role": "user", "content": "invoke"}], "invoke"),
+        ("generate", [{"type": "human", "content": "type_hi"}], "type_hi"),
+        ("invoke",   [{"type": "human", "content": "type_invoke"}], "type_invoke"),
+    ],
+)
+async def test_llm_chat_backcompat_enqueues_even_if_llm_blocks_helpers(
+    client,
+    make_queue,
+    method: str,
+    messages: list[dict[str, Any]],
+    expected_text: str,
+):
+    provider = StubProvider(reply="ok")
+    queue = make_queue(provider)
+    app.dependency_overrides[get_chat_queue] = lambda: queue
+
+    # ключевой момент: llm "ломает" hasattr/agenerate, но /llm chat должен жить
+    app.dependency_overrides[get_llm] = lambda: BlockingLLM()
+
+    response = await client.post(
+        "/llm",
+        json={
+            "method": method,
+            "kwargs": {
+                "model": "gpt-4o-mini",
+                "messages": messages,
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert provider.started == [expected_text]
+    assert provider.seen_payloads[-1]["model"] == "gpt-4o-mini"
+    assert response.headers["x-llm-proxy-priority"] == "p2"
+    assert response.headers["x-llm-proxy-request-id"].startswith("r_")
+
+    body = response.json()
+    # Новый контракт: /llm(chat) возвращает LangChain LLMResult
+    LLMResult.model_validate(body)
+    # ответ ассистента проброшен в generations
+    assert body["generations"][0][0]["text"] == "ok"
+
+    # если ты кладёшь model в llm_output — можно усилить (не обязательно)
+    # assert body.get("llm_output", {}).get("model") == "gpt-4o-mini"
+
+
+async def test_llm_legacy_prompt_calls_llm_agenerate(client, make_queue):
+    # Queue isn't used in this branch, but we still provide it as dependency.
+    provider = StubProvider()
+    app.dependency_overrides[get_chat_queue] = lambda: make_queue(provider)
+
+    llm = LegacyLLM()
+    app.dependency_overrides[get_llm] = lambda: llm
+
+    response = await client.post(
+        "/llm",
+        json={"method": "generate", "kwargs": {"prompt": "hello"}},
+    )
+
+    assert response.status_code == 200
+    assert llm.prompts == ["hello"]
+    assert response.json() == {"generations": [[{"text": "ok"}]]}
 
 
 async def test_completions_returns_metrics_headers(client, make_queue):
