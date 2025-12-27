@@ -171,6 +171,7 @@ cli-reinstall: cli-uninstall cli-install
 cli-where:
 	@echo "Expected: $(CLI_BIN)"
 	@command -v llm-proxy >/dev/null 2>&1 && echo "which llm-proxy: $$(command -v llm-proxy)" || echo "which llm-proxy: NOT FOUND"
+	@printf "\n"
 	@echo "PATH: $$PATH"
 	@if ! echo "$$PATH" | tr ':' '\n' | grep -Fxq "$(BINDIR)"; then \
 		echo "WARNING: $(BINDIR) is not in PATH. Add this to your shell rc:"; \
@@ -295,6 +296,13 @@ doctor:
 	$(call KV,Profile:, $(PROFILE))
 	$(call KV,BASE_URL:, $(BASE_URL))
 	$(call KV,Port:, $(EFFECTIVE_PORT))
+	@printf "ℹ LLM_ENV_FILE в compose env: "; \
+	if [ -f "$(COMPOSE_ENV)" ]; then \
+	  v=$$(grep -E '^LLM_ENV_FILE=' "$(COMPOSE_ENV)" || true); \
+	  if [ -n "$$v" ]; then printf "%s\n" "$$v"; else printf "MISSING\n"; fi; \
+	else \
+	  printf "NO COMPOSE_ENV\n"; \
+	fi	
 	$(call HR)
 	$(call INFO,Кто держит порт $(EFFECTIVE_PORT):)
 	@docker ps --format "{{.Names}} {{.Image}} {{.Ports}}" | grep -E "0.0.0.0:$(EFFECTIVE_PORT)->|:::$(EFFECTIVE_PORT)->" || true
