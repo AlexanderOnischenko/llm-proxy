@@ -78,6 +78,7 @@ endef
 help:
 	$(call TITLE,Команды Makefile)
 	@printf "$(BOLD)Dev$(RESET)\n"
+	@printf "  make reqs | dev-reqs\n"
 	@printf "  make lint | fmt | test\n"
 	@printf "  make build | rebulid\n"
 	@printf "\n$(BOLD)Команды начальной установки$(RESET)\n"
