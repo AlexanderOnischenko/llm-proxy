@@ -8,11 +8,11 @@ from fastapi import FastAPI, status
 
 import llm.deps as llm_deps
 from llm.config.settings import get_settings
+from llm.logging_config import configure_logging, get_logger
 from llm.metrics.prometheus import router as metrics_router
 from llm.middleware.request_logging import DebugRequestLoggingMiddleware, RequestIdMiddleware
 from llm.routers.chat import router as chat_router
 from llm.routers.llm import router as llm_router
-from llm.logging_config import configure_logging, get_logger
 
 
 def _assert_single_process_runtime() -> None:

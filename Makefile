@@ -8,6 +8,9 @@ lint:
 	$(PYTHON) -m ruff check src tests
 	pyright
 
+ruff-fix:
+	$(PYTHON) -m ruff check src tests --fix
+
 fmt:
 	$(PYTHON) -m ruff format src tests
 
