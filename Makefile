@@ -19,3 +19,9 @@ build:
 
 up:
 	docker run --rm -p $(PORT):$(PORT) --env-file .env -e LLM_PORT=$(PORT) $(IMAGE)
+
+reqs:
+	pip install -r requirements.txt
+
+dev-reqs:
+	pip install -r requirements-dev.txt
