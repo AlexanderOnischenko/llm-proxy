@@ -72,7 +72,7 @@ help:
 	$(call TITLE,Команды Makefile)
 	@printf "$(BOLD)Dev$(RESET)\n"
 	@printf "  make lint | fmt | test\n"
-	@printf "  make build\n"
+	@printf "  make build | rebulid\n"
 	@printf "\n$(BOLD)Runtime (через CLI профили)$(RESET)\n"
 	@printf "  make up PROFILE=default\n"
 	@printf "  make down PROFILE=default\n"
@@ -121,6 +121,12 @@ build:
 	docker build -t $(IMAGE) .
 	$(call OK,Готово)
 
+rebuild:
+	$(call TITLE,Сборка Docker image)
+	$(call KV,Image:, $(IMAGE))
+	$(call HR)
+	docker build --no-cache -t $(IMAGE) .
+	$(call OK,Готово)
 
 # -----------------------
 # CLI-driven lifecycle
