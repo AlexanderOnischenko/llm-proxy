@@ -164,10 +164,11 @@ CLI_BIN := $(BINDIR)/llm-proxy
 
 ## Install CLI into ~/.local/bin/llm-proxy
 cli-install:
-	@test -f "$(CLI_SRC)" || (echo "Missing $(CLI_SRC)" >&2; exit 1)
-	@mkdir -p "$(BINDIR)"
-	@install -m 0755 "$(CLI_SRC)" "$(CLI_BIN)"
-	@echo "Installed: $(CLI_BIN)"
+	./cli/llm-proxy install --project-dir $(PWD)
+	@echo "PATH check: run 'make cli-where'"
+
+cli-reinstall:
+	./cli/llm-proxy reinstall --project-dir $(PWD)
 	@echo "PATH check: run 'make cli-where'"
 
 ## Remove installed CLI binary

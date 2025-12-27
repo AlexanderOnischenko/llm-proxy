@@ -47,6 +47,8 @@ resolve_dirs() {
   PROFILE_DATA_ROOT="${DATA_DIR}/profiles"
   PROFILE_LOG_ROOT="${DATA_DIR}/logs"
   PROFILE_CACHE_ROOT="${CACHE_DIR}/profiles"
+
+  PROJECT_DIR_FILE="${CONFIG_DIR}/project_dir"
 }
 
 detect_compose_service_name() {
@@ -261,10 +263,14 @@ resolve_project_dir() {
     return
   fi
 
-  # 2) current working dir
-  if [[ -f "${PWD}/compose.yaml" ]]; then
-    echo "${PWD}"
-    return
+  # 2) config fallback (set during install)
+  if [[ -f "${PROJECT_DIR_FILE:-}" ]]; then
+    local saved
+    saved="$(sed -n '1p' "$PROJECT_DIR_FILE" | tr -d '\r\n')"
+    if [[ -n "$saved" && -f "${saved}/compose.yaml" ]]; then
+      echo "$saved"
+      return
+    fi
   fi
 
   # 3) relative to script location (works when running from repo checkout)
@@ -642,11 +648,33 @@ ensure_local_bin_in_path() {
 cmd_install() {
   local bin_dir="${HOME}/.local/bin"
   local target="${bin_dir}/${PROG}"
+
+  local project_dir=""
+  if [[ "${1:-}" == "--project-dir" ]]; then
+    project_dir="${2:-}"
+    [[ -n "$project_dir" ]] || die "install --project-dir requires a path"
+  else
+    # auto-detect if running from repo root
+    if [[ -f "${PWD}/compose.yaml" ]]; then
+      project_dir="${PWD}"
+    fi
+  fi
+
   mkdir -p "$bin_dir"
   install -m 0755 "$0" "$target"
   echo "Installed to $target"
   ensure_local_bin_in_path
+
+  if [[ -n "$project_dir" ]]; then
+    mkdir -p "$CONFIG_DIR"
+    printf "%s\n" "$project_dir" > "$PROJECT_DIR_FILE"
+    echo "Default project dir saved to: $PROJECT_DIR_FILE"
+  else
+    warn "Tip: set default project dir via:"
+    warn "  $PROG install --project-dir /path/to/llm-proxy"
+  fi
 }
+
 
 cmd_uninstall() {
   local target="${HOME}/.local/bin/${PROG}"
