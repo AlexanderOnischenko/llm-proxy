@@ -147,8 +147,11 @@ BINDIR ?= $(PREFIX)/bin
 
 CLI_SRC := ./cli/llm-proxy
 CLI_BIN := $(BINDIR)/llm-proxy
+COMPLETION_BASH_DIR ?= $(HOME)/.bash_completion.d
+COMPLETION_ZSH_DIR  ?= $(HOME)/.zsh/completions
+COMPLETION_FISH_DIR ?= $(HOME)/.config/fish/completions
 
-.PHONY: cli-install cli-uninstall cli-reinstall cli-where
+.PHONY: cli-install cli-uninstall cli-reinstall cli-where install-completion completion
 
 ## Install CLI into ~/.local/bin/llm-proxy
 cli-install:
@@ -175,6 +178,21 @@ cli-where:
 		echo "WARNING: $(BINDIR) is not in PATH. Add this to your shell rc:"; \
 		echo '  export PATH="$(BINDIR):$$PATH"'; \
 	fi
+
+## Install shell completions (bash|zsh|fish)
+completion install-completion:
+	@mkdir -p "$(COMPLETION_BASH_DIR)" "$(COMPLETION_ZSH_DIR)" "$(COMPLETION_FISH_DIR)"
+	@$(CLI_SRC) completion bash > "$(COMPLETION_BASH_DIR)/llm-proxy"
+	@$(CLI_SRC) completion zsh  > "$(COMPLETION_ZSH_DIR)/_llm-proxy"
+	@$(CLI_SRC) completion fish > "$(COMPLETION_FISH_DIR)/llm-proxy.fish"
+	@echo "Bash completion: $(COMPLETION_BASH_DIR)/llm-proxy"
+	@echo "  To enable now: source $(COMPLETION_BASH_DIR)/llm-proxy"
+	@echo "  If directory not in bash_completion path, add to ~/.bashrc:"
+	@echo "    if [ -d \"$(COMPLETION_BASH_DIR)\" ]; then . \"$(COMPLETION_BASH_DIR)/llm-proxy\"; fi"
+	@echo "Zsh completion:  $(COMPLETION_ZSH_DIR)/_llm-proxy (ensure this dir is in fpath; e.g. fpath+=($(COMPLETION_ZSH_DIR)))"
+	@echo "  To enable now: fpath=($(COMPLETION_ZSH_DIR) $$fpath); autoload -Uz compinit; compinit"
+	@echo "Fish completion: $(COMPLETION_FISH_DIR)/llm-proxy.fish"
+	@echo "Restart your shell or source the completion file for it to take effect."
 
 # -----------------------
 # CLI-driven lifecycle
