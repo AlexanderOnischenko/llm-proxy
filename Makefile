@@ -21,9 +21,12 @@ endif
 PORT ?= 8002
 
 # Detect profile dir (XDG)
-PROFILE_DIR := $(shell if [ -n "$$XDG_CONFIG_HOME" ]; then echo "$$XDG_CONFIG_HOME/llm-proxy/profiles"; else echo "$$HOME/.config/llm-proxy/profiles"; fi)
-COMPOSE_ENV := $(PROFILE_DIR)/$(PROFILE).env
-RUNTIME_ENV := $(PROFILE_DIR)/$(PROFILE).llm.env
+# Detect profile dir via CLI (handles XDG + legacy ~/.llm-proxy consistently)
+PROFILE_DIR := $(shell $(CLI) paths profiles_dir 2>/dev/null || \
+  ( if [ -n "$$XDG_CONFIG_HOME" ]; then echo "$$XDG_CONFIG_HOME/llm-proxy/profiles"; else echo "$$HOME/.config/llm-proxy/profiles"; fi ) )
+
+COMPOSE_ENV := $(shell $(CLI) paths compose_env "$(PROFILE)" 2>/dev/null || echo "$(PROFILE_DIR)/$(PROFILE).env")
+RUNTIME_ENV := $(shell $(CLI) paths runtime_env "$(PROFILE)" 2>/dev/null || echo "$(PROFILE_DIR)/$(PROFILE).llm.env")
 
 # Read LLM_PORT from profile compose env if present; fallback to PORT var.
 PORT_FROM_PROFILE := $(shell if [ -f "$(COMPOSE_ENV)" ]; then grep -E '^LLM_PORT=' "$(COMPOSE_ENV)" | tail -n1 | cut -d= -f2; fi)
@@ -92,7 +95,6 @@ help:
 	@printf "  make smoke\n"
 	@printf "  CONCURRENCY=30 REQUESTS=300 make load\n"
 	$(call HR)
-
 
 # -----------------------
 # Python quality targets

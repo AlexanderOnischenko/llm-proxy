@@ -58,6 +58,11 @@ sanitize_profile_name() {
   local name="${1:-}"
   [[ -n "$name" ]] || return 1
   if [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    # Guardrail: runtime env files use "<name>.llm.env".
+    # If user can create profile "<name>.llm", it leads to cascading "<name>.llm.llm" etc.
+    if [[ "$name" == *.llm ]]; then
+      return 1
+    fi
     echo "$name"
     return 0
   fi
@@ -100,6 +105,11 @@ list_profiles() {
   local f
   shopt -s nullglob
   for f in "${PROFILES_DIR}/"*.env; do
+    # Ignore runtime env files: "<name>.llm.env"
+    # Otherwise they show up as phantom profiles "<name>.llm".
+    if [[ "$f" == *.llm.env ]]; then
+      continue
+    fi
     basename "$f" .env
   done
   shopt -u nullglob
@@ -439,13 +449,47 @@ main() {
   case "$cmd" in
     help|-h|--help) usage ;;
     list|ls) list_profiles ;;
+    paths)
+      # Print resolved paths (so Makefile/docs can share the same source of truth).
+      # Usage:
+      #   llm-proxy paths
+      #   llm-proxy paths profiles_dir
+      #   llm-proxy paths compose_env <profile>
+      #   llm-proxy paths runtime_env <profile>
+      local key="${1:-}"
+      local name="${2:-}"
+      if [[ -z "$key" ]]; then
+        printf "config_dir=%s\n"   "$CONFIG_DIR"
+        printf "data_dir=%s\n"     "$DATA_DIR"
+        printf "cache_dir=%s\n"    "$CACHE_DIR"
+        printf "profiles_dir=%s\n" "$PROFILES_DIR"
+        printf "active_file=%s\n"  "$ACTIVE_FILE"
+        exit 0
+      fi
+      case "$key" in
+        config_dir)   echo "$CONFIG_DIR" ;;
+        data_dir)     echo "$DATA_DIR" ;;
+        cache_dir)    echo "$CACHE_DIR" ;;
+        profiles_dir) echo "$PROFILES_DIR" ;;
+        active_file)  echo "$ACTIVE_FILE" ;;
+        compose_env)
+          name="$(sanitize_profile_name "$name")" || die "invalid profile name (use letters/digits/._-; must not end with .llm)"
+          echo "$(profile_compose_env_path "$name")"
+          ;;
+        runtime_env)
+          name="$(sanitize_profile_name "$name")" || die "invalid profile name (use letters/digits/._-; must not end with .llm)"
+          echo "$(profile_runtime_env_path "$name")"
+          ;;
+        *) die "unknown paths key: $key" ;;
+      esac
+      ;;
     active)
       local a; a="$(get_active_profile)"
       [[ -n "$a" ]] && echo "$a" || die "no active profile (use: $PROG use <name>)"
       ;;
     init)
       local name="${1:-default}"
-      name="$(sanitize_profile_name "$name")" || die "invalid profile name (use letters/digits/._-)"
+      name="$(sanitize_profile_name "$name")" || die "invalid profile name (use letters/digits/._-; must not end with .llm)"
       ensure_profile_prefilled "$name"
       set_active_profile "$name"
       echo "Active: $name"
@@ -454,13 +498,13 @@ main() {
       ;;
     create)
       local name="${1:-}"; [[ -n "$name" ]] || die "usage: $PROG create <name>"
-      name="$(sanitize_profile_name "$name")" || die "invalid profile name (use letters/digits/._-)"
+      name="$(sanitize_profile_name "$name")" || die "invalid profile name (use letters/digits/._-; must not end with .llm)"  
       ensure_profile_prefilled "$name"
       echo "Created: $name"
       ;;
     use|switch)
       local name="${1:-}"; [[ -n "$name" ]] || die "usage: $PROG use <name>"
-      name="$(sanitize_profile_name "$name")" || die "invalid profile name (use letters/digits/._-)"
+      name="$(sanitize_profile_name "$name")" || die "invalid profile name (use letters/digits/._-; must not end with .llm)"
       ensure_profile_prefilled "$name"
 
       local current; current="$(get_active_profile)"
