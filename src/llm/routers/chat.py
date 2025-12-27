@@ -7,7 +7,7 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, Header, Request
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
-from shared_pkg.utils.logging_config import get_logger
+from llm.logging_config import get_logger
 
 from llm.deps import get_chat_queue
 from llm.models.chat import ChatCompletionRequest

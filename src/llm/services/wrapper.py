@@ -9,7 +9,7 @@ from langchain_core.outputs import ChatResult, LLMResult
 from langchain_core.prompt_values import PromptValue
 from langchain_openai import ChatOpenAI
 from pydantic import ConfigDict, Field
-from shared_pkg.utils.logging_config import get_logger
+from llm.logging_config import get_logger
 
 from llm.services.cache import SQLiteCache, make_key
 

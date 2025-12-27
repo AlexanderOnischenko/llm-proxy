@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 from openai import AsyncOpenAI, OpenAIError
-from shared_pkg.utils.logging_config import get_logger
+from llm.logging_config import get_logger
 
 from llm.config.settings import Settings
 from llm.models.chat import ChatCompletionRequest

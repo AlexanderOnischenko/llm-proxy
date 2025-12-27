@@ -14,7 +14,7 @@ from langchain_core.messages import SystemMessage as SchemaSystem
 from langchain_core.outputs import LLMResult
 from openai import OpenAIError
 from pydantic import ValidationError
-from shared_pkg.utils.logging_config import get_logger
+from llm.logging_config import get_logger
 
 from llm.deps import (
     CachedQueuedChatOpenAI,

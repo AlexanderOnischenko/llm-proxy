@@ -7,7 +7,7 @@ import uuid
 from typing import Callable
 
 from fastapi import Request, Response
-from llm.utils.logging_config import get_logger, request_id_var
+from llm.logging_config import get_logger, request_id_var
 from starlette.middleware.base import BaseHTTPMiddleware
 
 logger = get_logger(__name__)
