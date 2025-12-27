@@ -2,7 +2,7 @@ SHELL := /usr/bin/env bash
 .SHELLFLAGS := -euo pipefail -c
 
 .PHONY: help lint lint-ruff lint-pyright ruff-fix fmt test reqs dev-reqs \
-        build up down restart logs status ps \
+        build up up-profile down restart logs status ps \
         profiles active create use switch edit \
         port doctor smoke smoke-chat smoke-llm load
 
@@ -10,7 +10,14 @@ PYTHON ?= python
 IMAGE ?= llm-proxy:dev
 CLI ?= ./cli/llm-proxy
 
-PROFILE ?= default
+# если указан PROFILE=..., используем его
+# иначе берём активный из llm-proxy (команда должна просто печатать имя профиля)
+PROFILE ?= $(shell ./cli/llm-proxy active 2>/dev/null || true)
+# fallback если active пустой
+ifeq ($(strip $(PROFILE)),)
+PROFILE := default
+endif
+
 PORT ?= 8002
 
 # Detect profile dir (XDG)
@@ -224,7 +231,18 @@ port: create
 	@printf "$(DIM)compose env: %s$(RESET)\n" "$(COMPOSE_ENV)"
 	@printf "$(DIM)runtime env: %s$(RESET)\n" "$(RUNTIME_ENV)"
 
-up: create use
+up:
+	$(call TITLE,Запуск сервиса)
+	$(call KV,Profile:, $(PROFILE))
+	$(call KV,Compose env:, $(COMPOSE_ENV))
+	$(call KV,Runtime env:, $(RUNTIME_ENV))
+	$(call KV,Port:, $(EFFECTIVE_PORT))
+	$(call KV,BASE_URL:, $(BASE_URL))
+	$(call HR)
+	$(CLI) up "$(PROFILE)"
+	$(call OK,Запущено)
+
+up-profile: use
 	$(call TITLE,Запуск сервиса)
 	$(call KV,Profile:, $(PROFILE))
 	$(call KV,Compose env:, $(COMPOSE_ENV))
