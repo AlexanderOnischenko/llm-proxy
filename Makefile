@@ -1,22 +1,87 @@
-.PHONY: lint lint-ruff lint-pyright ruff-fix fmt test reqs dev-reqs \
-        build up down restart logs ps status \
+SHELL := /usr/bin/env bash
+.SHELLFLAGS := -euo pipefail -c
+
+.PHONY: help lint lint-ruff lint-pyright ruff-fix fmt test reqs dev-reqs \
+        build up down restart logs status ps \
         profiles active create use switch edit \
-        port doctor
+        port doctor smoke smoke-chat smoke-llm load
 
 PYTHON ?= python
 IMAGE ?= llm-proxy:dev
-
-# CLI entrypoint
 CLI ?= ./cli/llm-proxy
 
-# Profile management
 PROFILE ?= default
 PORT ?= 8002
 
-# Detect profile dir (XDG). Keep it simple and modern.
+# Detect profile dir (XDG)
 PROFILE_DIR := $(shell if [ -n "$$XDG_CONFIG_HOME" ]; then echo "$$XDG_CONFIG_HOME/llm-proxy/profiles"; else echo "$$HOME/.config/llm-proxy/profiles"; fi)
 COMPOSE_ENV := $(PROFILE_DIR)/$(PROFILE).env
 RUNTIME_ENV := $(PROFILE_DIR)/$(PROFILE).llm.env
+
+# Read LLM_PORT from profile compose env if present; fallback to PORT var.
+PORT_FROM_PROFILE := $(shell if [ -f "$(COMPOSE_ENV)" ]; then grep -E '^LLM_PORT=' "$(COMPOSE_ENV)" | tail -n1 | cut -d= -f2; fi)
+EFFECTIVE_PORT := $(if $(PORT_FROM_PROFILE),$(PORT_FROM_PROFILE),$(PORT))
+
+BASE_URL ?= http://localhost:$(EFFECTIVE_PORT)
+
+# Endpoints (defaults)
+CHAT_ENDPOINT ?= /v1/chat/completions
+LLM_ENDPOINT  ?= /llm
+
+# Pretty output (colors)
+RESET := \033[0m
+BOLD  := \033[1m
+DIM   := \033[2m
+RED   := \033[31m
+GRN   := \033[32m
+YEL   := \033[33m
+BLU   := \033[34m
+CYN   := \033[36m
+
+define HR
+	@printf "$(DIM)────────────────────────────────────────────────────────$(RESET)\n"
+endef
+
+define TITLE
+	$(call HR)
+	@printf "$(BOLD)%s$(RESET)\n" '$(1)'
+endef
+
+define KV
+	@printf "  %-13s %s\n" '$(1)' '$(2)'
+endef
+
+define INFO
+	@printf "$(CYN)ℹ$(RESET) %s\n" '$(1)'
+endef
+
+define OK
+	@printf "$(GRN)✔$(RESET) %s\n" '$(1)'
+endef
+
+define WARN
+	@printf "$(YEL)⚠$(RESET) %s\n" '$(1)'
+endef
+
+define ERR
+	@printf "$(RED)✖$(RESET) %s\n" '$(1)'
+endef
+
+
+help:
+	$(call TITLE,Команды Makefile)
+	@printf "$(BOLD)Dev$(RESET)\n"
+	@printf "  make lint | fmt | test\n"
+	@printf "  make build\n"
+	@printf "\n$(BOLD)Runtime (через CLI профили)$(RESET)\n"
+	@printf "  make up PROFILE=default\n"
+	@printf "  make down PROFILE=default\n"
+	@printf "  make port PROFILE=default PORT=8002\n"
+	@printf "  make doctor | status | ps | logs\n"
+	@printf "\n$(BOLD)Проверки$(RESET)\n"
+	@printf "  make smoke\n"
+	@printf "  CONCURRENCY=30 REQUESTS=300 make load\n"
+	$(call HR)
 
 
 # -----------------------
@@ -50,45 +115,49 @@ dev-reqs:
 # Docker image
 # -----------------------
 build:
+	$(call TITLE,Сборка Docker image)
+	$(call KV,Image:, $(IMAGE))
+	$(call HR)
 	docker build -t $(IMAGE) .
+	$(call OK,Готово)
 
 
 # -----------------------
 # CLI-driven lifecycle
 # -----------------------
-
-# List profiles known to CLI
 profiles:
-	$(CLI) list
+	$(call TITLE,Профили)
+	$(CLI) list || true
 
-# Show active profile (if CLI supports it)
 active:
+	$(call TITLE,Активный профиль)
 	$(CLI) active || true
 
-# Create profile if missing (non-interactive)
 create:
 	@mkdir -p "$(PROFILE_DIR)"
 	@if [ -f "$(COMPOSE_ENV)" ] || [ -f "$(RUNTIME_ENV)" ]; then \
-		echo "Profile '$(PROFILE)' already exists in $(PROFILE_DIR)"; \
+		printf "$(DIM)Профиль уже существует: %s (%s)$(RESET)\n" "$(PROFILE)" "$(PROFILE_DIR)"; \
 	else \
 		$(CLI) create "$(PROFILE)"; \
 	fi
 
-# Switch active profile
 use:
 	$(CLI) use "$(PROFILE)"
 
-# Convenience: switch profile in one command
 switch: create use
 
-# Open editor for profile (interactive)
 edit:
+	$(call TITLE,Редактирование профиля)
+	$(call KV,Profile:, $(PROFILE))
+	$(call KV,Runtime env:, $(RUNTIME_ENV))
+	$(call HR)
 	$(CLI) edit "$(PROFILE)"
 
-# Ensure PORT is written as a single source of truth into profile env files.
-# This edits both "<profile>.env" and "<profile>.llm.env" if they exist.
 port: create
-	@echo "Setting LLM_PORT=$(PORT) for profile '$(PROFILE)'"
+	$(call TITLE,Настройка порта профиля)
+	$(call KV,Profile:, $(PROFILE))
+	$(call KV,LLM_PORT:, $(PORT))
+	$(call HR)
 	@if [ -f "$(COMPOSE_ENV)" ]; then \
 		if grep -qE '^LLM_PORT=' "$(COMPOSE_ENV)"; then \
 			sed -i.bak -E 's/^LLM_PORT=.*/LLM_PORT=$(PORT)/' "$(COMPOSE_ENV)"; \
@@ -105,40 +174,174 @@ port: create
 		fi; \
 		rm -f "$(RUNTIME_ENV).bak"; \
 	fi
-	@echo "Done. Compose env: $(COMPOSE_ENV)"
-	@echo "Done. Runtime env: $(RUNTIME_ENV)"
+	$(call OK,Готово)
+	@printf "$(DIM)compose env: %s$(RESET)\n" "$(COMPOSE_ENV)"
+	@printf "$(DIM)runtime env: %s$(RESET)\n" "$(RUNTIME_ENV)"
 
-# Start using CLI (create+use+up)
 up: create use
+	$(call TITLE,Запуск сервиса)
+	$(call KV,Profile:, $(PROFILE))
+	$(call KV,Compose env:, $(COMPOSE_ENV))
+	$(call KV,Runtime env:, $(RUNTIME_ENV))
+	$(call KV,Port:, $(EFFECTIVE_PORT))
+	$(call KV,BASE_URL:, $(BASE_URL))
+	$(call HR)
 	$(CLI) up "$(PROFILE)"
+	$(call OK,Запущено)
 
-# Stop using CLI
 down:
-	$(CLI) down "$(PROFILE)" || $(CLI) down || true
+	$(call TITLE,Остановка сервиса)
+	$(call KV,Profile:, $(PROFILE))
+	$(call HR)
+	@sh -c '$(CLI) down "$(PROFILE)" || $(CLI) down || true'
+	$(call OK,Остановлено (best-effort))
 
 restart: down up
 
-# Optional helpers (may depend on your CLI implementation; harmless if not supported)
 logs:
-	$(CLI) logs "$(PROFILE)" || docker ps --format "table {{.Names}}\t{{.Ports}}" || true
+	$(call TITLE,Логи)
+	$(call KV,Profile:, $(PROFILE))
+	$(call HR)
+	$(CLI) logs "$(PROFILE)" || true
 
 ps:
+	$(call TITLE,Контейнеры Docker)
 	docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Ports}}"
 
 status:
-	@echo "PROFILE=$(PROFILE)"
-	@echo "PROFILE_DIR=$(PROFILE_DIR)"
-	@echo "COMPOSE_ENV=$(COMPOSE_ENV)"
-	@echo "RUNTIME_ENV=$(RUNTIME_ENV)"
-	@echo
-	@$(CLI) active || true
-	@$(CLI) list || true
-	@echo
-	@docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Ports}}" || true
+	$(call TITLE,Статус профиля)
+	$(call KV,Profile:, $(PROFILE))
+	$(call KV,Profiles dir:, $(PROFILE_DIR))
+	$(call KV,Compose env:, $(COMPOSE_ENV))
+	$(call KV,Runtime env:, $(RUNTIME_ENV))
+	$(call KV,Port:, $(EFFECTIVE_PORT))
+	$(call KV,BASE_URL:, $(BASE_URL))
+	$(call HR)
+	$(CLI) active || true
+	$(CLI) list || true
+	$(call HR)
+	$(CLI) status "$(PROFILE)" || true
+	$(call HR)
+	docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Ports}}" || true
 
-# Quick diagnostics: check port availability + show containers using it
 doctor:
-	@echo "Checking port $(PORT)..."
-	@docker ps --format "{{.Names}} {{.Ports}}" | grep -E "0.0.0.0:$(PORT)->|:::$(PORT)->" || true
-	@echo
-	@echo "If something is holding the port, stop it (docker stop <name>) or run: make down PROFILE=$(PROFILE)"
+	$(call TITLE,Doctor: проверка окружения)
+	$(call KV,Profile:, $(PROFILE))
+	$(call KV,BASE_URL:, $(BASE_URL))
+	$(call KV,Port:, $(EFFECTIVE_PORT))
+	$(call HR)
+	$(call INFO,Кто держит порт $(EFFECTIVE_PORT):)
+	@docker ps --format "{{.Names}} {{.Image}} {{.Ports}}" | grep -E "0.0.0.0:$(EFFECTIVE_PORT)->|:::$(EFFECTIVE_PORT)->" || true
+	$(call HR)
+	$(call INFO,Если порт занят — останови контейнер:)
+	@printf "  docker stop <name>\n"
+	$(call INFO,Или:)
+	@printf "  make down PROFILE=$(PROFILE)\n"
+	$(call HR)
+
+
+# -----------------------
+# Smoke tests
+# -----------------------
+smoke: smoke-chat smoke-llm
+	$(call OK,Smoke tests: OK)
+
+smoke-chat:
+	$(call TITLE,Smoke test: Chat API)
+	$(call KV,BASE_URL:, $(BASE_URL))
+	$(call KV,Endpoint:, $(CHAT_ENDPOINT))
+	$(call HR)
+	$(call INFO,Проверяю /health...)
+	@tmp="$$(mktemp)"; code="$$(curl -sS -o "$$tmp" -w "%{http_code}" "$(BASE_URL)/health" || echo 000)"; \
+	if [[ "$$code" =~ ^[23][0-9][0-9]$$ ]]; then \
+		printf "$(GRN)✔$(RESET) GET /health (HTTP %s)\n" "$$code"; \
+	else \
+		printf "$(RED)✖$(RESET) GET /health (HTTP %s)\n" "$$code"; \
+		printf "$(YEL)⚠$(RESET) Ответ сервера:\n"; sed -n '1,160p' "$$tmp" || true; rm -f "$$tmp"; exit 1; \
+	fi; rm -f "$$tmp"
+
+	$(call INFO,Проверяю /metrics...)
+	@tmp="$$(mktemp)"; code="$$(curl -sS -o "$$tmp" -w "%{http_code}" "$(BASE_URL)/metrics" || echo 000)"; \
+	if [[ "$$code" =~ ^[23][0-9][0-9]$$ ]]; then \
+		printf "$(GRN)✔$(RESET) GET /metrics (HTTP %s)\n" "$$code"; \
+	else \
+		printf "$(RED)✖$(RESET) GET /metrics (HTTP %s)\n" "$$code"; \
+		printf "$(YEL)⚠$(RESET) Ответ сервера:\n"; sed -n '1,160p' "$$tmp" || true; rm -f "$$tmp"; exit 1; \
+	fi; rm -f "$$tmp"
+
+	$(call INFO,Проверяю POST $(CHAT_ENDPOINT)...)
+	@payload="$$(mktemp)"; cat >"$$payload" <<'JSON' \
+{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]} \
+JSON \
+	; tmp="$$(mktemp)"; \
+	code="$$(curl -sS -o "$$tmp" -w "%{http_code}" \
+		-H "Content-Type: application/json" \
+		--data-binary "@$$payload" \
+		"$(BASE_URL)$(CHAT_ENDPOINT)" || echo 000)"; \
+	rm -f "$$payload"; \
+	if [[ "$$code" =~ ^[23][0-9][0-9]$$ ]]; then \
+		printf "$(GRN)✔$(RESET) POST $(CHAT_ENDPOINT) (HTTP %s)\n" "$$code"; \
+	else \
+		printf "$(RED)✖$(RESET) POST $(CHAT_ENDPOINT) (HTTP %s)\n" "$$code"; \
+		printf "$(YEL)⚠$(RESET) Ответ сервера:\n"; sed -n '1,200p' "$$tmp" || true; rm -f "$$tmp"; exit 1; \
+	fi; rm -f "$$tmp"
+
+	$(call HR)
+	$(call INFO,Метрики (срез):)
+	@curl -fsS "$(BASE_URL)/metrics" | egrep "llm_proxy_(requests_total|queue_overflow_total|queue_length|in_flight)" || true
+	$(call OK,Smoke chat: OK)
+
+smoke-llm:
+	$(call TITLE,Smoke test: /llm endpoint)
+	$(call KV,BASE_URL:, $(BASE_URL))
+	$(call KV,Endpoint:, $(LLM_ENDPOINT))
+	$(call HR)
+	$(call INFO,Проверяю POST $(LLM_ENDPOINT)...)
+	@payload="$$(mktemp)"; cat >"$$payload" <<'JSON' \
+{"method":"generate","kwargs":{"messages":[{"role":"user","content":"hi"}]}} \
+JSON \
+	; tmp="$$(mktemp)"; \
+	code="$$(curl -sS -o "$$tmp" -w "%{http_code}" \
+		-H "Content-Type: application/json" \
+		--data-binary "@$$payload" \
+		"$(BASE_URL)$(LLM_ENDPOINT)" || echo 000)"; \
+	rm -f "$$payload"; \
+	if [[ "$$code" =~ ^[23][0-9][0-9]$$ ]]; then \
+		printf "$(GRN)✔$(RESET) POST $(LLM_ENDPOINT) (HTTP %s)\n" "$$code"; \
+	else \
+		printf "$(RED)✖$(RESET) POST $(LLM_ENDPOINT) (HTTP %s)\n" "$$code"; \
+		printf "$(YEL)⚠$(RESET) Ответ сервера:\n"; sed -n '1,200p' "$$tmp" || true; rm -f "$$tmp"; exit 1; \
+	fi; rm -f "$$tmp"
+	$(call OK,Smoke llm: OK)
+
+
+# -----------------------
+# Load test
+# -----------------------
+load:
+	$(call TITLE,Load test)
+	$(call KV,BASE_URL:, $(BASE_URL))
+	$(call KV,Endpoint:, $(CHAT_ENDPOINT))
+	$(call KV,CONCURRENCY:, $${CONCURRENCY:-20})
+	$(call KV,REQUESTS:, $${REQUESTS:-200})
+	$(call HR)
+	$(call INFO,Отправляю запросы... (статистика по HTTP-кодам ниже))
+	@CONCURRENCY="$${CONCURRENCY:-20}"; REQUESTS="$${REQUESTS:-200}"; \
+	payload="$$(mktemp)"; cat >"$$payload" <<'JSON' \
+{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]} \
+JSON \
+	; \
+	seq 1 "$$REQUESTS" | xargs -n1 -P"$$CONCURRENCY" -I{} \
+	  bash -lc 'curl -sS -o /dev/null -w "%{http_code}\n" -H "Content-Type: application/json" -H "X-Request-Id: loadtest-{}" --data-binary "@'$$payload'" "$(BASE_URL)$(CHAT_ENDPOINT)" || echo 000' \
+	| tee /tmp/llm_proxy_load_codes.$$$$ | sort | uniq -c; \
+	rm -f "$$payload"; \
+	$(call HR); \
+	$(call INFO,Проверяю наличие ошибок...); \
+	if grep -Eq '(^|[[:space:]])(000|4[0-9][0-9]|5[0-9][0-9])$$' /tmp/llm_proxy_load_codes.$$$$; then \
+		printf "$(YEL)⚠$(RESET) В выдаче есть 4xx/5xx/000. Это не всегда плохо (например, overflow), но стоит посмотреть метрики/логи.\n"; \
+	fi; \
+	rm -f /tmp/llm_proxy_load_codes.$$$$; \
+	$(call HR); \
+	$(call INFO,Метрики (после нагрузки):); \
+	curl -fsS "$(BASE_URL)/metrics" | egrep "llm_proxy_(requests_total|queue_overflow_total|queue_length|in_flight|provider_latency_seconds|queue_wait_seconds)" || true; \
+	$(call OK,Load test завершён)
