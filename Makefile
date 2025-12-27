@@ -115,12 +115,24 @@ fmt:
 test:
 	pytest -q
 
-reqs:
+PIP_COMPILE ?= pip-compile
+
+requirements.txt: requirements.in
+	pip install -q pip-tools
+	$(PIP_COMPILE) -o $@ $<
+
+requirements-dev.txt: requirements-dev.in
+	pip install -q pip-tools
+	$(PIP_COMPILE) -o $@ $<
+
+compile-reqs: requirements.txt
+compile-dev-reqs: requirements-dev.txt
+
+reqs: requirements.txt
 	pip install -r requirements.txt
 
-dev-reqs:
+dev-reqs: requirements-dev.txt
 	pip install -r requirements-dev.txt
-
 
 # -----------------------
 # Docker image
