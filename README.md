@@ -1,7 +1,13 @@
 # llm-proxy (Docker-first)
 
-LLM Proxy сервис, рассчитанный на запуск **только в Docker**.  
-Управление окружениями/профилями и запуском — через `cli/llm-proxy` (docker compose under the hood).
+`llm-proxy` — LLM proxy-сервис с очередью, приоритетами и кэшированием, рассчитанный **исключительно на запуск в Docker**.
+Управление окружениями и профилями осуществляется через CLI `llm-proxy`, который работает поверх `docker compose`.
+
+Проект предназначен для:
+- проксирования OpenAI-compatible LLM API,
+- ограничения и балансировки нагрузки,
+- изоляции конфигураций через профили,
+- использования как shared LLM backend.
 
 ---
 
@@ -13,12 +19,18 @@ LLM Proxy сервис, рассчитанный на запуск **тольк�
 ./cli/llm-proxy logs
 ```
 
+По умолчанию сервис будет доступен на:
+```
+http://localhost:8002
+```
+
 ---
 
 ## Требования
 
-- Docker + Docker Compose v2 (`docker compose ...`)
-- bash (macOS/Linux)
+- Docker
+- Docker Compose v2 (`docker compose ...`)
+- bash (Linux / macOS)
 
 Проверка:
 ```bash
@@ -28,191 +40,278 @@ docker compose version
 
 ---
 
+## Архитектурные принципы (важно)
+
+- ❗ **Только single-worker**
+- ❌ Gunicorn не поддерживается
+- ❌ Multiprocess Prometheus не поддерживается
+- ❌ WEB_CONCURRENCY / UVICORN_WORKERS > 1 запрещены
+
+Эти ограничения проверяются на старте контейнера.
+Если они нарушены — контейнер завершится с ошибкой.
+
+---
+
 ## Быстрый старт
 
-### 1) Инициализировать профиль (создаст env-файлы и каталоги)
+### 1. Инициализация профиля
+
 ```bash
 ./cli/llm-proxy init default
 ```
 
-Это создаст два файла профиля (в конфиг-директории пользователя) и откроет редактор для `runtime env`:
+Будет создан профиль `default`, включающий:
 
-- `<profile>.env` — переменные **для подстановки в compose** (порты/volumes/image/build/etc)
-- `<profile>.llm.env` — **runtime-конфиг приложения** (LLM_API_BASE, LLM_MODEL_NAME, таймауты, кэш, очередь...)
+- `<profile>.env` — переменные **docker compose**
+- `<profile>.llm.env` — **runtime-конфигурация приложения**
+- bind-mount директории (кэш, логи, дампы)
 
-Также будут созданы директории на хосте для bind mounts (кэш/логи/дампы), принадлежащие профилю.
+Файлы профиля открываются в редакторе автоматически.
 
-### 2) Запустить сервис
+---
+
+### 2. Запуск
+
 ```bash
 ./cli/llm-proxy up
 ```
 
-### 3) Посмотреть логи
+### 3. Логи
+
 ```bash
 ./cli/llm-proxy logs
 ```
 
-### 4) Остановить
+### 4. Остановка
+
 ```bash
 ./cli/llm-proxy down
 ```
 
 ---
 
-## Как это устроено
+## CLI
 
-### Профили
-Профиль = набор настроек и “свои” каталоги данных. Это удобно для:
-- разных upstream провайдеров/ключей
-- разных портов
-- разных политик кэша/очереди
-- переключения между контекстами (dev/stage/etc)
-
-Основные команды:
+### Основные команды
 
 ```bash
-./cli/llm-proxy list
-./cli/llm-proxy use <name>
-./cli/llm-proxy active
-./cli/llm-proxy edit            # edit runtime env for active profile
-./cli/llm-proxy edit-compose    # edit compose env for active profile
-./cli/llm-proxy delete <name>
+llm-proxy init <name>      # создать профиль
+llm-proxy list             # список профилей
+llm-proxy use <name>       # сделать профиль активным
+llm-proxy active           # показать активный профиль
+llm-proxy up [name]        # запустить
+llm-proxy down             # остановить
+llm-proxy logs             # логи
+llm-proxy status           # статус контейнеров
+llm-proxy delete <name>    # удалить профиль и данные
 ```
 
-### Где лежат файлы профилей
-CLI хранит профили в XDG-путях (или в legacy `~/.llm-proxy`, если он уже есть):
+### Редактирование конфигурации
 
-- Linux:
-  - `~/.config/llm-proxy/profiles/*.env`
-  - `~/.config/llm-proxy/profiles/*.llm.env`
-- macOS:
-  - аналогично (через `$XDG_CONFIG_HOME`, если задан)
-
-Профильные данные (bind mounts):
-- кэш: `~/.cache/llm-proxy/profiles/<name>/`
-- логи: `~/.local/share/llm-proxy/logs/<name>/`
-- дампы: `~/.local/share/llm-proxy/profiles/<name>/crash_dumps/`
-
-> При `llm-proxy delete <name>` эти каталоги удаляются.
+```bash
+llm-proxy edit             # runtime env
+llm-proxy edit-compose     # compose env
+```
 
 ---
 
-## Конфигурация (env)
+## Где хранятся профили
 
-### 1) Compose env (`<profile>.env`)
-Это переменные **для docker compose**, например:
+Используются XDG-пути (или legacy `~/.llm-proxy`, если уже существует):
 
-- `LLM_IMAGE`, `LLM_BUILD_CONTEXT`, `LLM_DOCKERFILE`
-- `LLM_PORT`
-- `CACHE_HOST_DIR`, `LOGS_HOST_DIR`, `DUMP_HOST_DIR`
-- `CACHE_CONTAINER_DIR`, `LOGS_CONTAINER_DIR`, `DUMP_CONTAINER_DIR`
-- `LLM_ENV_FILE` — путь к `<profile>.llm.env`
+### Конфигурация
+```
+~/.config/llm-proxy/profiles/
+  ├── default.env
+  ├── default.llm.env
+  └── staging.env
+```
 
-### 2) Runtime env (`<profile>.llm.env`)
-Это переменные приложения (из `src/llm/config/settings.py`), например:
+### Данные профилей (bind mounts)
+```
+~/.cache/llm-proxy/profiles/<profile>/
+~/.local/share/llm-proxy/logs/<profile>/
+~/.local/share/llm-proxy/profiles/<profile>/crash_dumps/
+```
 
-- `LLM_API_BASE`, `LLM_API_KEY`, `LLM_MODEL_NAME`
-- `LLM_TIMEOUT`, `LLM_MAX_CONCURRENT`
-- `LLM_PRIORITY_SLOTS` (JSON строка)
-- `LLM_CACHE_ENABLED`, `CACHE_CONTAINER_DIR`, `LLM_CACHE_FILE`, `LLM_CACHE_TTL`
-- `ENV`, `TESTING`, `LOG_LEVEL`
+При `llm-proxy delete <profile>` все эти директории удаляются.
 
-Пример `LLM_PRIORITY_SLOTS`:
-```dotenv
+---
+
+## Makefile (если работаете из репозитория)
+
+### CLI
+
+```bash
+make cli-install
+make cli-reinstall
+make cli-uninstall
+```
+
+### Управление сервисом
+
+```bash
+make up PROFILE=default
+make down PROFILE=default
+make logs PROFILE=default
+make status PROFILE=default
+```
+
+### Разработка
+
+```bash
+make lint
+make test
+make help
+```
+
+---
+
+## Runtime конфигурация (`<profile>.llm.env`)
+
+### Upstream LLM
+
+```env
+LLM_PROVIDER=openai
+LLM_API_BASE=https://api.llm7.io/v1
+LLM_API_KEY=...
+LLM_MODEL_NAME=deepseek-v3-0324
+LLM_TEMPERATURE=0.7
+LLM_TIMEOUT=300
+```
+
+Поддерживается любой OpenAI-compatible API.
+
+---
+
+## Очередь и приоритеты
+
+Поддерживаются приоритеты:
+- `p1` — высокий
+- `p2` — default
+- `p3` — background
+
+### Базовые настройки
+
+```env
+LLM_MAX_CONCURRENT=3
+LLM_PRIORITY_DEFAULT=p2
+LLM_QUEUE_MAX_LEN=100
+```
+
+### Лимиты слотов (рекомендуется)
+
+```env
 LLM_PRIORITY_SLOTS={"p1":2,"p2":1,"p3":1}
 ```
+
+### Legacy-совместимость
+
+```env
+LLM_PRIORITY_SLOTS_P1=2
+LLM_PRIORITY_SLOTS_P2=1
+LLM_PRIORITY_SLOTS_P3=1
+```
+
+Если `LLM_PRIORITY_SLOTS` задан — legacy-поля игнорируются.
+
+---
+
+## Кэширование
+
+Используется **единый SQLite-кэш** для всех chat endpoint'ов.
+
+### Настройки
+
+```env
+LLM_CACHE_ENABLED=true
+LLM_CACHE_TTL=600000
+```
+
+### Пути
+
+```env
+LLM_CACHE_PATH=/tmp/llm_cache.db
+```
+
+или legacy:
+
+```env
+CACHE_CONTAINER_DIR=/cache
+LLM_CACHE_FILE=llm_cache.sqlite
+```
+
+Правило выбора:
+1. Если задан `LLM_CACHE_PATH`
+2. Иначе → `CACHE_CONTAINER_DIR/LLM_CACHE_FILE`
+
+---
+
+## HTTP API
+
+### Основные endpoints
+
+- `POST /llm`
+- `POST /v1/chat/completions`
+
+Формат совместим с OpenAI Chat Completions API.
 
 ---
 
 ## Запуск не из репозитория
 
-Если CLI установлен в PATH (см. ниже), то чтобы запускать из любого места,
-нужно указать путь к репозиторию (где лежит `compose.yaml`):
+Если CLI установлен в `$PATH`, но вы не в директории репозитория:
 
 ```bash
-export LLM_PROXY_PROJECT_DIR=/path/to/llm-proxy-repo
+export LLM_PROXY_PROJECT_DIR=/path/to/llm-proxy
 llm-proxy up
 ```
 
+Рекомендуется добавить переменную в shell-профиль.
+
 ---
 
-## Установка CLI (опционально)
-
-Можно установить скрипт в `~/.local/bin`:
+## Установка CLI
 
 ```bash
 ./cli/llm-proxy install
 ```
 
 Проверка:
+
 ```bash
-which llm-proxy
 llm-proxy help
 ```
 
 Удаление:
+
 ```bash
 llm-proxy uninstall
 ```
 
 ---
 
-## Полезные команды
-
-Статус контейнеров (для активного профиля):
-```bash
-./cli/llm-proxy status
-```
-
-Переключить профиль (остановит старый best-effort, активирует новый):
-```bash
-./cli/llm-proxy use staging
-./cli/llm-proxy up
-```
-
----
-
-## Endpoints
-
-Реальный список зависит от роутеров в `src/llm/routers/`, но обычно:
-- `GET /health` — healthcheck (если включён)
-- `GET /metrics` — Prometheus метрики
-- `POST /llm` или `/v1/chat/...` — LLM proxy endpoints
-
----
-
-## Разработка
-
-Установка dev-зависимостей:
-```bash
-python -m pip install -r requirements.txt -r requirements-dev.txt
-```
-
-Линт/типы/тесты (если есть `Makefile`):
-```bash
-make lint
-make test
-```
-
----
-
 ## Troubleshooting
 
-### “compose.yaml not found”
-Запускай CLI:
-- из корня репозитория (где `compose.yaml`), **или**
-- установи `LLM_PROXY_PROJECT_DIR`:
-  ```bash
-  export LLM_PROXY_PROJECT_DIR=/path/to/repo
-  ```
+### compose.yaml not found
+
+Вы либо:
+- не в корне репозитория
+- либо не указали `LLM_PROXY_PROJECT_DIR`
 
 ### Порт занят
-Поменяй `LLM_PORT` в `<profile>.env` (compose env) или в `.env` если используешь его напрямую.
 
-### Нужно быстро посмотреть/изменить env
-```bash
-./cli/llm-proxy edit
-./cli/llm-proxy edit-compose
-```
+Измените `LLM_PORT` в `<profile>.env`.
+
+### Контейнер сразу падает
+
+Проверьте:
+- нет ли `WEB_CONCURRENCY`
+- нет ли `UVICORN_WORKERS`
+- нет ли `PROMETHEUS_MULTIPROC_DIR`
 
 ---
+
+## Лицензия
+
+MIT
