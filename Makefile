@@ -354,10 +354,9 @@ smoke-chat:
 	fi; rm -f "$$tmp"
 
 	$(call INFO,Проверяю POST $(CHAT_ENDPOINT)...)
-	@payload="$$(mktemp)"; cat >"$$payload" <<'JSON' \
-{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]} \
-JSON \
-	; tmp="$$(mktemp)"; \
+	@payload="$$(mktemp)"; \
+	printf '%s' '{"messages":[{"role":"user","content":"hi"}]}' >"$$payload"; \
+	tmp="$$(mktemp)"; \
 	code="$$(curl -sS -o "$$tmp" -w "%{http_code}" \
 		-H "Content-Type: application/json" \
 		--data-binary "@$$payload" \
@@ -381,10 +380,9 @@ smoke-llm:
 	$(call KV,Endpoint:, $(LLM_ENDPOINT))
 	$(call HR)
 	$(call INFO,Проверяю POST $(LLM_ENDPOINT)...)
-	@payload="$$(mktemp)"; cat >"$$payload" <<'JSON' \
-{"method":"generate","kwargs":{"messages":[{"role":"user","content":"hi"}]}} \
-JSON \
-	; tmp="$$(mktemp)"; \
+	@payload="$$(mktemp)"; \
+	printf '%s' '{"method":"generate","kwargs":{"messages":[{"role":"user","content":"hi"}]}}' >"$$payload"; \
+	tmp="$$(mktemp)"; \
 	code="$$(curl -sS -o "$$tmp" -w "%{http_code}" \
 		-H "Content-Type: application/json" \
 		--data-binary "@$$payload" \
@@ -411,9 +409,8 @@ load:
 	$(call HR)
 	$(call INFO,Отправляю запросы... (статистика по HTTP-кодам ниже))
 	@CONCURRENCY="$${CONCURRENCY:-20}"; REQUESTS="$${REQUESTS:-200}"; \
-	payload="$$(mktemp)"; cat >"$$payload" <<'JSON' \
-{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]} \
-JSON \
+	payload="$$(mktemp)"; \
+	printf '%s' '{"messages":[{"role":"user","content":"hi"}]}' >"$$payload"; \
 	; \
 	seq 1 "$$REQUESTS" | xargs -n1 -P"$$CONCURRENCY" -I{} \
 	  bash -lc 'curl -sS -o /dev/null -w "%{http_code}\n" -H "Content-Type: application/json" -H "X-Request-Id: loadtest-{}" --data-binary "@'$$payload'" "$(BASE_URL)$(CHAT_ENDPOINT)" || echo 000' \
