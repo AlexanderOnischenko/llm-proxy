@@ -11,7 +11,13 @@ from langchain_core.messages import AIMessage as SchemaAI
 from langchain_core.messages import BaseMessage as SchemaBase
 from langchain_core.messages import HumanMessage as SchemaHuman
 from langchain_core.messages import SystemMessage as SchemaSystem
-from langchain_core.outputs import ChatGeneration, LLMResult
+from langchain_core.outputs import (
+    ChatGeneration,
+    ChatGenerationChunk,
+    Generation,
+    GenerationChunk,
+    LLMResult,
+)
 from openai import OpenAIError
 from pydantic import ValidationError
 
@@ -152,7 +158,7 @@ def _chat_completion_to_llm_result(body: dict[str, Any]) -> LLMResult:
     if not isinstance(choices, list):
         choices = []
 
-    gens: list[ChatGeneration] = []
+    gens: list[ChatGeneration | Generation | GenerationChunk | ChatGenerationChunk] = []
     for ch in choices:
         if not isinstance(ch, dict):
             continue
@@ -161,13 +167,10 @@ def _chat_completion_to_llm_result(body: dict[str, Any]) -> LLMResult:
         content = msg.get("content")
 
         if isinstance(content, str):
-            text = content
             ai_content = content
         elif content is None:
-            text = ""
             ai_content = ""
         else:
-            text = str(content)
             ai_content = content
 
         # SchemaAI(content=...) expects already validated content
@@ -179,10 +182,10 @@ def _chat_completion_to_llm_result(body: dict[str, Any]) -> LLMResult:
         if ch.get("index") is not None:
             info["index"] = ch.get("index")
 
-        gens.append(ChatGeneration(message=ai, text=text, generation_info=(info or None)))
+        gens.append(ChatGeneration(message=ai, generation_info=(info or None)))
 
     if not gens:
-        gens = [ChatGeneration(message=SchemaAI(content=""), text="")]
+        gens = [ChatGeneration(message=SchemaAI(content=""))]
 
     llm_output: dict[str, Any] = {"raw": body}
     for k in ("id", "model", "usage"):
