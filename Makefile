@@ -73,6 +73,9 @@ help:
 	@printf "$(BOLD)Dev$(RESET)\n"
 	@printf "  make lint | fmt | test\n"
 	@printf "  make build | rebulid\n"
+	@printf "\n$(BOLD)Команды начальной установки$(RESET)\n"
+	@printf "  make cli-install | cli-uninstall | cli-reinstall\n"
+	@printf "  make cli-where\n"	
 	@printf "\n$(BOLD)Runtime (через CLI профили)$(RESET)\n"
 	@printf "  make up PROFILE=default\n"
 	@printf "  make down PROFILE=default\n"
@@ -127,6 +130,43 @@ rebuild:
 	$(call HR)
 	docker build --no-cache -t $(IMAGE) .
 	$(call OK,Готово)
+
+# ---------------------------
+# CLI install settings
+# ---------------------------
+PREFIX ?= $(HOME)/.local
+BINDIR ?= $(PREFIX)/bin
+
+CLI_SRC := ./cli/llm-proxy
+CLI_BIN := $(BINDIR)/llm-proxy
+
+.PHONY: cli-install cli-uninstall cli-reinstall cli-where
+
+## Install CLI into ~/.local/bin/llm-proxy
+cli-install:
+	@test -f "$(CLI_SRC)" || (echo "Missing $(CLI_SRC)" >&2; exit 1)
+	@mkdir -p "$(BINDIR)"
+	@install -m 0755 "$(CLI_SRC)" "$(CLI_BIN)"
+	@echo "Installed: $(CLI_BIN)"
+	@echo "PATH check: run 'make cli-where'"
+
+## Remove installed CLI binary
+cli-uninstall:
+	@rm -f "$(CLI_BIN)"
+	@echo "Removed: $(CLI_BIN)"
+
+## Reinstall CLI (uninstall + install)
+cli-reinstall: cli-uninstall cli-install
+
+## Print where llm-proxy resolves from, and warn if not in PATH
+cli-where:
+	@echo "Expected: $(CLI_BIN)"
+	@command -v llm-proxy >/dev/null 2>&1 && echo "which llm-proxy: $$(command -v llm-proxy)" || echo "which llm-proxy: NOT FOUND"
+	@echo "PATH: $$PATH"
+	@if ! echo "$$PATH" | tr ':' '\n' | grep -Fxq "$(BINDIR)"; then \
+		echo "WARNING: $(BINDIR) is not in PATH. Add this to your shell rc:"; \
+		echo '  export PATH="$(BINDIR):$$PATH"'; \
+	fi
 
 # -----------------------
 # CLI-driven lifecycle
