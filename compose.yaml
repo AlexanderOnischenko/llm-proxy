@@ -1,0 +1,45 @@
+services:
+  llm:
+    image: ${LLM_IMAGE:-backplane/llm:latest}
+
+    build:
+      context: ${LLM_BUILD_CONTEXT:-.}
+      dockerfile: ${LLM_DOCKERFILE:-Dockerfile}
+
+    # Runtime-конфиг приложения (ключи, провайдер, модель и т.п.)
+    env_file:
+      - llm.env
+
+    environment:
+      # Порт: и LLM_PORT (твой), и PORT (на всякий случай для платформ)
+      - LLM_PORT=${LLM_PORT:-8002}
+      - PORT=${LLM_PORT:-8002}
+
+      # Файловые пути внутри контейнера
+      - LOG_FILE_PATH=${LOGS_CONTAINER_DIR:-/logs}/llm-errors.log
+      - CACHE_CONTAINER_DIR=${CACHE_CONTAINER_DIR:-/home/appuser/app/cache}
+
+      # (опционально) уровень логов
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+
+    ports:
+      - "${LLM_PORT:-8002}:${LLM_PORT:-8002}"
+
+    volumes:
+      - "${CACHE_HOST_DIR:-./cache}:${CACHE_CONTAINER_DIR:-/home/appuser/app/cache}"
+      - "${LOGS_HOST_DIR:-./logs}:${LOGS_CONTAINER_DIR:-/logs}"
+
+    restart: unless-stopped
+    init: true
+
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import os,sys,urllib.request; p=os.getenv('LLM_PORT','8002'); \
+          r=urllib.request.urlopen(f'http://127.0.0.1:{p}/health', timeout=2); \
+          sys.exit(0 if 200<=getattr(r,'status',200)<300 else 1)\""
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 5
