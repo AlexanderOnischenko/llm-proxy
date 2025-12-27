@@ -118,6 +118,36 @@ clear_active_profile() {
 }
 
 list_profiles() {
+  local active bold reset green blue color_ok
+  active="$(get_active_profile)"
+
+  bold=""
+  reset=""
+  green=""
+  blue=""
+  color_ok=0
+
+  if [[ -t 1 ]]; then
+    if command -v tput >/dev/null 2>&1; then
+      local colors
+      colors="$(tput colors 2>/dev/null || echo 0)"
+      if [[ "$colors" -ge 8 ]]; then
+        color_ok=1
+        green="$(tput setaf 2 2>/dev/null || echo '')"
+        blue="$(tput setaf 4 2>/dev/null || echo '')"
+      fi
+      bold="$(tput bold 2>/dev/null || echo '')"
+      reset="$(tput sgr0 2>/dev/null || echo '')"
+    fi
+
+    [[ -z "$bold" ]] && bold=$'\033[1m'
+    [[ -z "$reset" ]] && reset=$'\033[0m'
+    if [[ "$color_ok" -eq 1 ]]; then
+      [[ -z "$green" ]] && green=$'\033[32m'
+      [[ -z "$blue" ]] && blue=$'\033[34m'
+    fi
+  fi
+
   local f
   shopt -s nullglob
   for f in "${PROFILES_DIR}/"*.env; do
@@ -125,7 +155,27 @@ list_profiles() {
     if [[ "$f" == *.llm.env ]]; then
       continue
     fi
-    basename "$f" .env
+    local name
+    name="$(basename "$f" .env)"
+
+    if [[ "$name" == "$active" ]]; then
+      local color
+      color=""
+      if [[ "$color_ok" -eq 1 ]]; then
+        color="${green:-${blue:-}}"
+        if [[ -z "$color" ]]; then
+          color="$blue"
+        fi
+      fi
+
+      if [[ -t 1 ]]; then
+        printf "* %s%s%s\n" "${color}${bold}" "$name" "$reset"
+      else
+        echo "* $name"
+      fi
+    else
+      echo "  $name"
+    fi
   done
   shopt -u nullglob
 }
