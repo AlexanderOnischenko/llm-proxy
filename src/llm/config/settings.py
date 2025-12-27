@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     llm_verbose:       bool          = Field(True,                validation_alias="LLM_VERBOSE")
     llm_timeout:       float         = Field(300.0, validation_alias="LLM_TIMEOUT")
 
-        #  Настройки очередей
+    #  Настройки очередей
     llm_max_concurrent:int           = Field(1,                   validation_alias="LLM_MAX_CONCURRENT")
     llm_priority_slots: dict[str, int] = Field(
         default_factory=lambda: {"p1": 2, "p2": 1, "p3": 1}, validation_alias="LLM_PRIORITY_SLOTS"
@@ -56,11 +56,11 @@ class Settings(BaseSettings):
     testing:           bool          = Field(False,              validation_alias="TESTING")
 
     # Для Bearer-аутентификации
-    # llm_auth_url: Optional[str] =                   Field(None, env="GIGACHAT_AUTH_URL")
+    # llm_auth_url: Optional[str] = Field(None, env="GIGACHAT_AUTH_URL")
     # llm_auth_client_id: Optional[str] = None
     # llm_auth_client_secret: Optional[str] = None
     # Или для Basic-аутентификации при получении токена
-    # llm_auth_basic: Optional[str]                    = Field(None, env="GIGACHAT_API_KEY")  # base64 от "client_id:client_secret"
+    # llm_auth_basic: Optional[str] = Field(None, env="GIGACHAT_API_KEY")  # base64 от "client_id:client_secret"
 
     @property
     def is_production(self) -> bool:
