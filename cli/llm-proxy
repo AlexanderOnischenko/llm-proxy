@@ -255,34 +255,34 @@ list_profiles() {
 # ---------------------------
 # Project dir (where compose.yaml lives)
 # ---------------------------
-resolve_project_dir() {
-  # 1) explicit override
-  if [[ -n "${LLM_PROXY_PROJECT_DIR:-}" ]]; then
-    [[ -f "${LLM_PROXY_PROJECT_DIR}/compose.yaml" ]] || die "compose.yaml not found in LLM_PROXY_PROJECT_DIR=${LLM_PROXY_PROJECT_DIR}"
-    echo "${LLM_PROXY_PROJECT_DIR}"
-    return
-  fi
-
-  # 2) config fallback (set during install)
-  if [[ -f "${PROJECT_DIR_FILE:-}" ]]; then
-    local saved
-    saved="$(sed -n '1p' "$PROJECT_DIR_FILE" | tr -d '\r\n')"
-    if [[ -n "$saved" && -f "${saved}/compose.yaml" ]]; then
-      echo "$saved"
+  resolve_project_dir() {
+    # 1) explicit override
+    if [[ -n "${LLM_PROXY_PROJECT_DIR:-}" ]]; then
+      [[ -f "${LLM_PROXY_PROJECT_DIR}/compose.yaml" ]] || die "compose.yaml not found in LLM_PROXY_PROJECT_DIR=${LLM_PROXY_PROJECT_DIR}"
+      echo "${LLM_PROXY_PROJECT_DIR}"
       return
     fi
-  fi
 
-  # 3) relative to script location (works when running from repo checkout)
-  local here
-  here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-  if [[ -f "${here}/compose.yaml" ]]; then
-    echo "${here}"
-    return
-  fi
+    # 2) config fallback (set during install)
+    if [[ -f "${PROJECT_DIR_FILE:-}" ]]; then
+      local saved
+      saved="$(sed -n '1p' "$PROJECT_DIR_FILE" | tr -d '\r\n')"
+      if [[ -n "$saved" && -f "${saved}/compose.yaml" ]]; then
+        echo "$saved"
+        return
+      fi
+    fi
 
-  die "cannot locate compose.yaml. Run from repo root, or set LLM_PROXY_PROJECT_DIR=/path/to/repo"
-}
+    # 3) relative to script location (works when running from repo checkout)
+    local here
+    here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+    if [[ -f "${here}/compose.yaml" ]]; then
+      echo "${here}"
+      return
+    fi
+
+    die "cannot locate compose.yaml. Run from repo root, or set LLM_PROXY_PROJECT_DIR=/path/to/repo"
+  }
 
 # ---------------------------
 # Template & editing
