@@ -3,7 +3,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Mapping, cast
 
-from pydantic import AnyHttpUrl, Field
+from pydantic import AnyHttpUrl, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _MODEL_CONFIG = SettingsConfigDict(
@@ -78,6 +78,14 @@ class Settings(BaseSettings):
     @property
     def llm_priority_total_slots(self) -> int:
         return sum(max(v, 0) for v in self.llm_priority_limits_map.values())
+
+    @field_validator("llm_model_override")
+    @classmethod
+    def _normalize_override(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
 
     @property
     def llm_priority_limits_map(self) -> dict[str, int]:

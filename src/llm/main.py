@@ -54,7 +54,7 @@ def create_app() -> FastAPI:
             llm_deps.build_llm(settings)
             provider = llm_deps.build_chat_provider(settings)
             llm_deps.build_chat_queue(settings, provider)
-            override = getattr(provider, "model_override", None)
+            override = provider.model_override
             override_display = override or "disabled"
             logger.info(
                 "Startup: model-override=%s (%s)",
