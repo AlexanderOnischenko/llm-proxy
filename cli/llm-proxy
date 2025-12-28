@@ -436,8 +436,9 @@ profile_exists() {
 
 write_compose_override() {
   local name="$1"
-  local runtime_env override project_dir base_compose service
+  local runtime_env compose_env override project_dir base_compose service
   runtime_env="$(profile_runtime_env_path "$name")"
+  compose_env="$(profile_compose_env_path "$name")"
   override="$(compose_override_path "$name")"
 
   project_dir="$(resolve_project_dir)"
@@ -451,6 +452,7 @@ write_compose_override() {
 services:
   ${service}:
     env_file:
+      - "$compose_env"
       - "$runtime_env"
 EOF
 }
@@ -458,9 +460,24 @@ EOF
 validate_runtime_env_or_die() {
   local name="$1"
   ensure_profile_prefilled "$name"
+  validate_compose_env_or_die "$name"
   local runtime_env; runtime_env="$(profile_runtime_env_path "$name")"
   [[ -f "$runtime_env" ]] || die "runtime env file not found: $runtime_env"
   write_compose_override "$name"
+}
+
+validate_compose_env_or_die() {
+  local name="$1"
+  local compose_env; compose_env="$(profile_compose_env_path "$name")"
+  [[ -f "$compose_env" ]] || die "profile not found: $name (missing compose env: $compose_env)"
+
+  # These vars are required for safe volume binding (compose interpolation).
+  local v
+  for v in CACHE_HOST_DIR CACHE_CONTAINER_DIR; do
+    if ! envfile_get "$compose_env" "$v" >/dev/null 2>&1; then
+      die "missing required $v in $compose_env (run: llm-proxy edit $name, or recreate profile)"
+    fi
+  done
 }
 
 compose_cmd() {

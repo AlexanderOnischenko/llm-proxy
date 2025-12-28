@@ -22,8 +22,8 @@ services:
       - "${LLM_PORT}:${LLM_PORT}"
 
     volumes:
-      - "${CACHE_HOST_DIR:-./cache}:${CACHE_CONTAINER_DIR:-/home/appuser/app/cache}"
-      - "${LOGS_HOST_DIR:-./logs}:${LOGS_CONTAINER_DIR:-/logs}"
+      - "${CACHE_HOST_DIR:?CACHE_HOST_DIR is required}:${CACHE_CONTAINER_DIR:?CACHE_CONTAINER_DIR is required}"
+      - "${LOGS_HOST_DIR:?LOGS_HOST_DIR is required}:${LOGS_CONTAINER_DIR:?LOGS_CONTAINER_DIR is required}"
 
     restart: unless-stopped
     init: true
