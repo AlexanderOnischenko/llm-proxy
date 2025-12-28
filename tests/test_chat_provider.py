@@ -11,11 +11,18 @@ from llm.services.chat_provider import OpenAIChatProvider
 
 
 class DummySettings:
-    def __init__(self, *, cache_path: str):
+    def __init__(
+        self,
+        *,
+        cache_path: str,
+        llm_default_model_name: str = "gpt-test",
+        llm_model_override: str | None = None,
+    ):
         self.llm_api_key = "test"
         self.llm_api_base = "http://example"
         self.llm_timeout = 30
-        self.llm_model_name = "gpt-test"
+        self.llm_default_model_name = llm_default_model_name
+        self.llm_model_override = llm_model_override
         self.llm_temperature = 0.1
         self.llm_top_p = 1.0
         self.llm_cache_ttl = 0
@@ -99,3 +106,82 @@ async def test_chat_provider_cache_key_changes_when_params_change(tmp_path, monk
 
     # Different temperature => different cache key => two provider calls
     assert calls["n"] == 2
+
+
+@pytest.mark.asyncio
+async def test_model_override_respected_when_explicit(tmp_path, monkeypatch):
+    cache = SQLiteCache(path=str(tmp_path / "cache.sqlite"), ttl_seconds=0, enabled=False)
+    settings = DummySettings(
+        cache_path=cache.path,
+        llm_model_override="override-model",
+    )
+    provider = OpenAIChatProvider(cast(Any, settings), cache=cache)
+
+    captured_payloads: list[dict[str, Any]] = []
+
+    async def create(**payload):
+        captured_payloads.append(payload)
+        return _Resp({"ok": True, "payload": payload})
+
+    monkeypatch.setattr(provider._client.chat.completions, "create", create, raising=False)
+
+    req = ChatCompletionRequest(
+        model="sender-model",
+        messages=[ChatMessage(role="user", content="hi")],
+    )
+
+    await provider.complete(req)
+    assert captured_payloads[-1]["model"] == "override-model"
+
+    req_no_model = ChatCompletionRequest(
+        model=None,
+        messages=[ChatMessage(role="user", content="hi 2")],
+    )
+    await provider.complete(req_no_model)
+    assert captured_payloads[-1]["model"] == "override-model"
+
+    req_default_literal = ChatCompletionRequest(
+        model="default",
+        messages=[ChatMessage(role="user", content="hi 3")],
+    )
+    await provider.complete(req_default_literal)
+    assert captured_payloads[-1]["model"] == "override-model"
+
+
+@pytest.mark.asyncio
+async def test_sender_model_respected_when_no_override(tmp_path, monkeypatch):
+    cache = SQLiteCache(path=str(tmp_path / "cache.sqlite"), ttl_seconds=0, enabled=False)
+    settings = DummySettings(
+        cache_path=cache.path,
+        llm_default_model_name="proxy-default",
+    )
+    provider = OpenAIChatProvider(cast(Any, settings), cache=cache)
+
+    captured_payloads: list[dict[str, Any]] = []
+
+    async def create(**payload):
+        captured_payloads.append(payload)
+        return _Resp({"ok": True, "payload": payload})
+
+    monkeypatch.setattr(provider._client.chat.completions, "create", create, raising=False)
+
+    sender_model = ChatCompletionRequest(
+        model="sender-model",
+        messages=[ChatMessage(role="user", content="hi")],
+    )
+    await provider.complete(sender_model)
+    assert captured_payloads[-1]["model"] == "sender-model"
+
+    missing_model = ChatCompletionRequest(
+        model=None,
+        messages=[ChatMessage(role="user", content="hi 2")],
+    )
+    await provider.complete(missing_model)
+    assert captured_payloads[-1]["model"] == "proxy-default"
+
+    default_literal = ChatCompletionRequest(
+        model="default",
+        messages=[ChatMessage(role="user", content="hi 3")],
+    )
+    await provider.complete(default_literal)
+    assert captured_payloads[-1]["model"] == "default"

@@ -48,13 +48,19 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        settings = get_settings()
         cache = None
         try:
             cache = llm_deps.build_cache(settings)
             llm_deps.build_llm(settings)
             provider = llm_deps.build_chat_provider(settings)
             llm_deps.build_chat_queue(settings, provider)
+            override = getattr(provider, "model_override", None)
+            override_display = override or "disabled"
+            logger.info(
+                "Startup: model-override=%s (%s)",
+                override_display,
+                "sender model ignored" if override else "sender model respected",
+            )
             logger.info("Startup: cache initialized, dependencies warmed")
             yield
         finally:

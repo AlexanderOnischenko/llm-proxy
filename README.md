@@ -175,7 +175,9 @@ make help
 LLM_PROVIDER=openai
 LLM_API_BASE=https://api.llm7.io/v1
 LLM_API_KEY=...
-LLM_MODEL_NAME=deepseek-v3-0324
+LLM_DEFAULT_MODEL_NAME=deepseek-v3-0324
+# optional hard override (forces this model for all requests)
+# LLM_MODEL_NAME=gemini-2.0-flash
 LLM_TEMPERATURE=0.7
 LLM_TIMEOUT=300
 ```

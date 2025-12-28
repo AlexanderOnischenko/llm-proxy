@@ -23,7 +23,8 @@ class Settings(BaseSettings):
     #  Настройки upstream LLM-провайдера
     llm_api_base:      AnyHttpUrl    = Field(cast(AnyHttpUrl, "https://api.llm7.io/v1"), validation_alias="LLM_API_BASE") # pyright: ignore[reportAssignmentType]
     llm_api_key:       str           = Field("unused",            validation_alias="LLM_API_KEY")
-    llm_model_name:    str           = Field("deepseek-v3-0324",  validation_alias="LLM_MODEL_NAME")
+    llm_default_model_name: str      = Field("deepseek-v3-0324",  validation_alias="LLM_DEFAULT_MODEL_NAME")
+    llm_model_override: str | None   = Field(None,                validation_alias="LLM_MODEL_NAME")
     llm_temperature:   float         = Field(0.0,                 validation_alias="LLM_TEMPERATURE")
     llm_top_p:         float         = Field(1.0,                 validation_alias="LLM_TOP_P")
     llm_max_tokens:    int           = Field(50000,               validation_alias="LLM_MAX_TOKENS")

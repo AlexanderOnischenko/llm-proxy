@@ -299,7 +299,9 @@ TESTING=false
 # Upstream LLM
 LLM_API_BASE=https://api.llm7.io/v1
 LLM_API_KEY=unused
-LLM_MODEL_NAME=deepseek-v3-0324
+LLM_DEFAULT_MODEL_NAME=deepseek-v3-0324
+# Optional hard override (forces this model for all requests)
+# LLM_MODEL_NAME=deepseek-v3-0324
 LLM_TEMPERATURE=0.0
 LLM_TOP_P=1.0
 LLM_MAX_TOKENS=50000
