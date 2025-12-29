@@ -184,5 +184,4 @@
 
 ## Где читать дальше
 
-- `docs/dev/components.md` — каталог компонентов (пакеты/модули и их роли).
 - Тесты: `test_cache_*`, `test_chat_provider.py`, `test_chat_priority_queue.py`, `test_wrapper_cache.py`.
