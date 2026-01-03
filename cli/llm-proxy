@@ -771,7 +771,12 @@ compose_logs() {
     die "no containers found for project ${project_name}; profile may be stopped or invalid"
   fi
   mapfile -t containers <<<"$containers"
-  docker logs -f --tail=200 "${containers[@]}"
+  if [[ "${#containers[@]}" -gt 1 ]]; then
+    echo "Multiple containers found for project ${project_name}; following most recent: ${containers[0]}" >&2
+    echo "Other containers:" >&2
+    printf '  %s\n' "${containers[@]:1}" >&2
+  fi
+  docker logs -f --tail=200 "${containers[0]}"
 }
 
 # ---------------------------
