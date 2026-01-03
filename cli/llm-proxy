@@ -379,8 +379,8 @@ _llm_proxy_completions() {
 
   if [[ "$cmd" == "logs" ]]; then
     local profiles services first
-    profiles="$("${COMP_WORDS[0]}" __complete profiles 2>/dev/null)"
-    services="$("${COMP_WORDS[0]}" __complete services 2>/dev/null)"
+    profiles="$("${COMP_WORDS[0]}" __complete profiles 2>/dev/null | tr '\n' ' ')"
+    services="$("${COMP_WORDS[0]}" __complete services 2>/dev/null | tr '\n' ' ')"
     first="${COMP_WORDS[2]:-}"
 
     if [[ $COMP_CWORD -eq 2 ]]; then
@@ -413,7 +413,8 @@ completion_script_zsh() {
 
 _llm_proxy() {
   local -a commands
-  commands=(${(f)$(_call_program commands "$words[1]" __complete commands)})
+  local cmd_bin="${words[1]:-llm-proxy}"
+  commands=(${(f)$(_call_program commands "$cmd_bin" __complete commands)})
 
   local context state state_descr line
   _arguments -C \
@@ -888,6 +889,7 @@ main() {
         services) completion_service_names ;;
         *) exit 0 ;;
       esac
+      exit 0
       ;;
     help|-h|--help) usage ;;
     list|ls) list_profiles ;;
