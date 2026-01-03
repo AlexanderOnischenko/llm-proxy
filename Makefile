@@ -191,6 +191,10 @@ completion install-completion:
 	@echo "    if [ -d \"$(COMPLETION_BASH_DIR)\" ]; then . \"$(COMPLETION_BASH_DIR)/llm-proxy\"; fi"
 	@echo "Zsh completion:  $(COMPLETION_ZSH_DIR)/_llm-proxy (ensure this dir is in fpath; e.g. fpath+=($(COMPLETION_ZSH_DIR)))"
 	@echo "  To enable now: fpath=($(COMPLETION_ZSH_DIR) $$fpath); autoload -Uz compinit; compinit"
+	@echo "  Add permanently to ~/.zshrc:"
+	@echo "    fpath=($(COMPLETION_ZSH_DIR) \$$fpath)"
+	@echo "    autoload -Uz compinit"
+	@echo "    compinit"
 	@echo "Fish completion: $(COMPLETION_FISH_DIR)/llm-proxy.fish"
 	@echo "Restart your shell or source the completion file for it to take effect."
 

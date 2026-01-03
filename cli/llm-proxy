@@ -264,7 +264,13 @@ resolve_project_dir() {
     return
   fi
 
-  # 2) config fallback (set during install)
+  # 2) current working dir
+  if [[ -f "${PWD}/compose.yaml" ]]; then
+    echo "${PWD}"
+    return
+  fi
+
+  # 3) config fallback (set during install)
   if [[ -f "${PROJECT_DIR_FILE:-}" ]]; then
     local saved
     saved="$(sed -n '1p' "$PROJECT_DIR_FILE" | tr -d '\r\n')"
@@ -274,7 +280,7 @@ resolve_project_dir() {
     fi
   fi
 
-  # 3) relative to script location (works when running from repo checkout)
+  # 4) relative to script location (works when running from repo checkout)
   local here
   here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
   if [[ -f "${here}/compose.yaml" ]]; then
@@ -310,6 +316,7 @@ completion_service_names() {
 }
 
 completion_profiles() {
+  # Prints one profile per line for completion consumers.
   list_profile_names
 }
 
