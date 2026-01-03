@@ -16,11 +16,12 @@ def create_custom_llm(
     и любых override_kwargs.
     """
     priority_total_slots = max(settings.llm_priority_total_slots, 1)
+    selected_model = settings.llm_model_override or settings.llm_default_model_name
     params: Dict[str, Any] = {
         # ChatOpenAI параметры
         "base_url":        str(settings.llm_api_base),
-        "model_name":       settings.llm_model_name,
-        "model":            settings.llm_model_name,
+        "model_name":       selected_model,
+        "model":            selected_model,
         "temperature":     settings.llm_temperature,
         "api_key":  settings.llm_api_key,
         "verbose":         settings.llm_verbose,
