@@ -5,8 +5,8 @@ from llm.config.settings import Settings, get_settings
 from llm.services.cache import SQLiteCache
 from llm.services.chat_provider import OpenAIChatProvider
 from llm.services.client import CachedQueuedChatOpenAI, create_custom_llm
-from llm.services.provider_protocol import ChatProvider
 from llm.services.priority_queue import PriorityChatQueue
+from llm.services.provider_protocol import ChatProvider
 
 _llm_instance: CachedQueuedChatOpenAI | None = None
 _chat_provider: ChatProvider | None = None
