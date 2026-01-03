@@ -21,7 +21,8 @@ class OpenAIChatProvider:
             timeout=settings.llm_timeout,
         )
         self._base_url = str(settings.llm_api_base)
-        self._default_model = settings.llm_model_name
+        self._default_model = settings.llm_default_model_name
+        self._model_override = settings.llm_model_override
         self._default_temperature = settings.llm_temperature
         self._default_top_p = settings.llm_top_p
         # Prefer injected shared cache (from deps.build_cache).
@@ -49,6 +50,8 @@ class OpenAIChatProvider:
             default_temperature=self._default_temperature,
             default_top_p=self._default_top_p,
         )
+        if self._model_override:
+            payload["model"] = self._model_override
 
         key = self._cache_key(payload)
 
@@ -73,3 +76,7 @@ class OpenAIChatProvider:
 
         # SQLiteCache handles disabled mode internally.
         return await self._cache.aget_or_set(key, _call_provider, on_hit=_on_hit, on_miss=_on_miss)
+
+    @property
+    def model_override(self) -> str | None:
+        return self._model_override

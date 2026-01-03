@@ -6,7 +6,11 @@ set -euo pipefail
 
 PROG="llm-proxy"
 
-die() { echo "$PROG: $*" >&2; exit 1; }
+die() {   
+  printf '%s: %b\n' "${PROG:-llm-proxy}" "$*" >&2
+  exit 1
+  }
+
 warn() { echo "$PROG: $*" >&2; }
 is_macos() { [[ "${OSTYPE:-}" == "darwin"* ]]; }
 
@@ -47,6 +51,8 @@ resolve_dirs() {
   PROFILE_DATA_ROOT="${DATA_DIR}/profiles"
   PROFILE_LOG_ROOT="${DATA_DIR}/logs"
   PROFILE_CACHE_ROOT="${CACHE_DIR}/profiles"
+
+  PROJECT_DIR_FILE="${CONFIG_DIR}/project_dir"
 }
 
 detect_compose_service_name() {
@@ -187,6 +193,51 @@ clear_active_profile() {
   rm -f "$ACTIVE_FILE"
 }
 
+pick_fallback_profile() {
+  local exclude="${1:-}"
+
+  if [[ "$exclude" != "default" ]]; then
+    if [[ -f "$(profile_compose_env_path default)" || -f "$(profile_runtime_env_path default)" ]]; then
+      echo "default"
+      return 0
+    fi
+  fi
+
+  local names=()
+  local -A seen=()
+  local f name base
+  shopt -s nullglob
+  for f in "${PROFILES_DIR}/"*.env "${PROFILES_DIR}/"*.llm.env; do
+    base="${f##*/}"
+    if [[ "$base" == *.llm.env ]]; then
+      name="${base%.llm.env}"
+    else
+      name="${base%.env}"
+    fi
+
+    if [[ "$name" == "$exclude" ]]; then
+      continue
+    fi
+
+    if [[ -n "${seen[$name]:-}" ]]; then
+      continue
+    fi
+    seen[$name]=1
+    names+=("$name")
+  done
+  shopt -u nullglob
+
+  if [[ "${#names[@]}" -gt 0 ]]; then
+    mapfile -d '' -t names < <(printf '%s\0' "${names[@]}" | sort -z)
+    for name in "${names[@]}"; do
+      echo "$name"
+      return 0
+    done
+  fi
+
+  return 1
+}
+
 list_profiles() {
   local active bold reset green blue color_ok
   active="$(get_active_profile)"
@@ -256,6 +307,32 @@ list_profile_names() {
 # ---------------------------
 # Project dir (where compose.yaml lives)
 # ---------------------------
+resolve_project_dir_soft() {
+  if [[ -n "${LLM_PROXY_PROJECT_DIR:-}" ]]; then
+    [[ -f "${LLM_PROXY_PROJECT_DIR}/compose.yaml" ]] || return 1
+    echo "${LLM_PROXY_PROJECT_DIR}"
+    return 0
+  fi
+
+  if [[ -f "${PROJECT_DIR_FILE:-}" ]]; then
+    local saved
+    saved="$(sed -n '1p' "$PROJECT_DIR_FILE" | tr -d '\r\n')"
+    if [[ -n "$saved" && -f "${saved}/compose.yaml" ]]; then
+      echo "$saved"
+      return 0
+    fi
+  fi
+
+  local here
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)" || return 1
+  if [[ -f "${here}/compose.yaml" ]]; then
+    echo "${here}"
+    return 0
+  fi
+
+  return 1
+}
+
 resolve_project_dir() {
   # 1) explicit override
   if [[ -n "${LLM_PROXY_PROJECT_DIR:-}" ]]; then
@@ -264,10 +341,14 @@ resolve_project_dir() {
     return
   fi
 
-  # 2) current working dir
-  if [[ -f "${PWD}/compose.yaml" ]]; then
-    echo "${PWD}"
-    return
+  # 2) config fallback (set during install)
+  if [[ -f "${PROJECT_DIR_FILE:-}" ]]; then
+    local saved
+    saved="$(sed -n '1p' "$PROJECT_DIR_FILE" | tr -d '\r\n')"
+    if [[ -n "$saved" && -f "${saved}/compose.yaml" ]]; then
+      echo "$saved"
+      return
+    fi
   fi
 
   # 3) config fallback (set during install)
@@ -503,7 +584,9 @@ TESTING=false
 # Upstream LLM
 LLM_API_BASE=https://api.llm7.io/v1
 LLM_API_KEY=unused
-LLM_MODEL_NAME=deepseek-v3-0324
+LLM_DEFAULT_MODEL_NAME=deepseek-v3-0324
+# Optional hard override (forces this model for all requests)
+# LLM_MODEL_NAME=deepseek-v3-0324
 LLM_TEMPERATURE=0.0
 LLM_TOP_P=1.0
 LLM_MAX_TOKENS=50000
@@ -640,8 +723,9 @@ profile_exists() {
 
 write_compose_override() {
   local name="$1"
-  local runtime_env override project_dir base_compose service
+  local runtime_env compose_env override project_dir base_compose service
   runtime_env="$(profile_runtime_env_path "$name")"
+  compose_env="$(profile_compose_env_path "$name")"
   override="$(compose_override_path "$name")"
 
   project_dir="$(resolve_project_dir)"
@@ -655,16 +739,83 @@ write_compose_override() {
 services:
   ${service}:
     env_file:
+      - "$compose_env"
       - "$runtime_env"
 EOF
+}
+
+validate_runtime_env_soft() {
+  local name="$1"
+  local runtime_env compose_env project_dir base_compose service
+  runtime_env="$(profile_runtime_env_path "$name")"
+  compose_env="$(profile_compose_env_path "$name")"
+  [[ -f "$runtime_env" && -f "$compose_env" ]] || return 1
+
+  project_dir="$(resolve_project_dir_soft)" || return 1
+  base_compose="${project_dir}/compose.yaml"
+  service="$(detect_compose_service_name "$base_compose")"
+  [[ -n "$service" ]] || return 1
+
+  local v
+  for v in CACHE_HOST_DIR CACHE_CONTAINER_DIR LOGS_HOST_DIR LOGS_CONTAINER_DIR; do
+    if ! envfile_get "$compose_env" "$v" >/dev/null 2>&1; then
+      return 1
+    fi
+  done
+
+  return 0
+}
+
+write_compose_override_soft() {
+  local name="$1"
+  local runtime_env compose_env override project_dir base_compose service
+  runtime_env="$(profile_runtime_env_path "$name")"
+  compose_env="$(profile_compose_env_path "$name")"
+  override="$(compose_override_path "$name")"
+
+  project_dir="$(resolve_project_dir_soft)" || return 1
+  base_compose="${project_dir}/compose.yaml"
+  service="$(detect_compose_service_name "$base_compose")"
+  [[ -n "$service" ]] || return 1
+
+  mkdir -p "$(dirname "$override")" || return 1
+  cat >"$override" <<EOF || return 1
+services:
+  ${service}:
+    env_file:
+      - "$compose_env"
+      - "$runtime_env"
+EOF
+}
+
+can_compose_operate() {
+  local name="$1"
+  validate_runtime_env_soft "$name"
 }
 
 validate_runtime_env_or_die() {
   local name="$1"
   ensure_profile_prefilled "$name"
+  validate_compose_env_or_die "$name"
   local runtime_env; runtime_env="$(profile_runtime_env_path "$name")"
   [[ -f "$runtime_env" ]] || die "runtime env file not found: $runtime_env"
   write_compose_override "$name"
+}
+
+validate_compose_env_or_die() {
+  local name="$1"
+  local compose_env runtime_env
+  compose_env="$(profile_compose_env_path "$name")"
+  runtime_env="$(profile_runtime_env_path "$name")"
+  [[ -f "$compose_env" ]] || die "profile not found: $name (compose env missing)\ncompose env: $compose_env\nruntime env: $runtime_env\nrun: llm-proxy edit-compose $name"
+
+  # These vars are required for safe volume binding (compose interpolation).
+  local v
+  for v in CACHE_HOST_DIR CACHE_CONTAINER_DIR LOGS_HOST_DIR LOGS_CONTAINER_DIR; do
+    if ! envfile_get "$compose_env" "$v" >/dev/null 2>&1; then
+      die "missing required $v in compose env\ncompose env: $compose_env\nruntime env: $runtime_env\nrun: llm-proxy edit-compose $name"
+    fi
+  done
 }
 
 compose_cmd() {
@@ -747,9 +898,50 @@ compose_debug() {
 
 compose_down_best_effort() {
   local name="$1"
-  validate_runtime_env_or_die "$name"
   docker_available || return 0
-  compose_cmd "$name" down --remove-orphans >/dev/null 2>&1 || true
+
+  local project_name="${PROG}-${name}"
+
+  if can_compose_operate "$name"; then
+    local project_dir compose_env override
+    if project_dir="$(resolve_project_dir_soft)"; then :; else project_dir=""; fi
+    if [[ -n "$project_dir" ]]; then
+      local compose_args=()
+      compose_env="$(profile_compose_env_path "$name")"
+      override="$(compose_override_path "$name")"
+      if write_compose_override_soft "$name"; then
+        if [[ -f "$override" ]]; then
+          compose_args+=(-f "$override")
+        fi
+      fi
+
+      docker compose \
+        --project-directory "$project_dir" \
+        -f "${project_dir}/compose.yaml" \
+        "${compose_args[@]}" \
+        --env-file "$compose_env" \
+        -p "$project_name" \
+        down --remove-orphans >/dev/null 2>&1 || true
+      return 0
+    fi
+  fi
+
+  local containers networks
+  containers="$(docker ps -aq --filter "label=com.docker.compose.project=${project_name}" || true)"
+  if [[ -n "$containers" ]]; then
+    mapfile -t containers <<<"$containers"
+    if [[ "${#containers[@]}" -gt 0 ]]; then
+      docker rm -f "${containers[@]}" >/dev/null 2>&1 || true
+    fi
+  fi
+
+  networks="$(docker network ls -q --filter "label=com.docker.compose.project=${project_name}" || true)"
+  if [[ -n "$networks" ]]; then
+    mapfile -t networks <<<"$networks"
+    if [[ "${#networks[@]}" -gt 0 ]]; then
+      docker network rm "${networks[@]}" >/dev/null 2>&1 || true
+    fi
+  fi
 }
 
 compose_status() {
@@ -759,8 +951,46 @@ compose_status() {
 }
 
 compose_logs() {
-  local name="$1"; shift || true
-  compose_cmd "$name" logs -f --tail=200 "$@"
+  local name="$1"
+
+  if can_compose_operate "$name"; then
+    local project_dir compose_env override
+    if project_dir="$(resolve_project_dir_soft)"; then :; else project_dir=""; fi
+    if [[ -n "$project_dir" ]]; then
+      local compose_args=()
+      compose_env="$(profile_compose_env_path "$name")"
+      override="$(compose_override_path "$name")"
+      if write_compose_override_soft "$name"; then
+        if [[ -f "$override" ]]; then
+          compose_args+=(-f "$override")
+        fi
+      fi
+
+      docker compose \
+        --project-directory "$project_dir" \
+        -f "${project_dir}/compose.yaml" \
+        "${compose_args[@]}" \
+        --env-file "$compose_env" \
+        -p "${PROG}-${name}" \
+        logs -f --tail=200
+      return $?
+    fi
+  fi
+
+  docker_available || die "docker not found"
+  local project_name containers
+  project_name="${PROG}-${name}"
+  containers="$(docker ps -aq --filter "label=com.docker.compose.project=${project_name}" || true)"
+  if [[ -z "$containers" ]]; then
+    die "no containers found for project ${project_name}; profile may be stopped or invalid"
+  fi
+  mapfile -t containers <<<"$containers"
+  if [[ "${#containers[@]}" -gt 1 ]]; then
+    echo "Multiple containers found for project ${project_name}; following most recent: ${containers[0]}" >&2
+    echo "Other containers:" >&2
+    printf '  %s\n' "${containers[@]:1}" >&2
+  fi
+  docker logs -f --tail=200 "${containers[0]}"
 }
 
 # ---------------------------
@@ -853,11 +1083,33 @@ ensure_local_bin_in_path() {
 cmd_install() {
   local bin_dir="${HOME}/.local/bin"
   local target="${bin_dir}/${PROG}"
+
+  local project_dir=""
+  if [[ "${1:-}" == "--project-dir" ]]; then
+    project_dir="${2:-}"
+    [[ -n "$project_dir" ]] || die "install --project-dir requires a path"
+  else
+    # auto-detect if running from repo root
+    if [[ -f "${PWD}/compose.yaml" ]]; then
+      project_dir="${PWD}"
+    fi
+  fi
+
   mkdir -p "$bin_dir"
   install -m 0755 "$0" "$target"
   echo "Installed to $target"
   ensure_local_bin_in_path
+
+  if [[ -n "$project_dir" ]]; then
+    mkdir -p "$CONFIG_DIR"
+    printf "%s\n" "$project_dir" > "$PROJECT_DIR_FILE"
+    echo "Default project dir saved to: $PROJECT_DIR_FILE"
+  else
+    warn "Tip: set default project dir via:"
+    warn "  $PROG install --project-dir /path/to/llm-proxy"
+  fi
 }
+
 
 cmd_uninstall() {
   local target="${HOME}/.local/bin/${PROG}"
@@ -1072,6 +1324,9 @@ main() {
       [[ "${1:-}" == "--yes" || "${1:-}" == "-y" ]] && assume_yes="1"
 
       name="$(sanitize_profile_name "$name")" || die "invalid profile name (use letters/digits/._-; must not end with .llm)"
+      if [[ "$name" == "default" ]]; then
+        die "cannot delete profile 'default' (protected). Create another profile and switch to it if you want a different active profile."
+      fi
       local compose_file runtime_file
       compose_file="$(profile_compose_env_path "$name")"
       runtime_file="$(profile_runtime_env_path "$name")"
@@ -1090,6 +1345,17 @@ main() {
       rm -f "$compose_file" "$runtime_file" "$(compose_override_path "$name")"
       rm -rf "${PROFILE_CACHE_ROOT:?}/${name}" "${PROFILE_LOG_ROOT:?}/${name}" "${PROFILE_DATA_ROOT:?}/${name}"
       echo "Deleted: $name"
+
+      if [[ "$active" == "$name" ]]; then
+        local fallback
+        fallback="$(pick_fallback_profile "$name")"
+        if [[ -n "$fallback" ]]; then
+          set_active_profile "$fallback"
+          echo "Active: $fallback"
+        else
+          echo "Active profile cleared (no profiles left)."
+        fi
+      fi
       ;;
     install) cmd_install ;;
     uninstall) cmd_uninstall ;;

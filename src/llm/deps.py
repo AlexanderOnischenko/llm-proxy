@@ -6,9 +6,10 @@ from llm.services.cache import SQLiteCache
 from llm.services.chat_provider import OpenAIChatProvider
 from llm.services.client import CachedQueuedChatOpenAI, create_custom_llm
 from llm.services.priority_queue import PriorityChatQueue
+from llm.services.provider_protocol import ChatProvider
 
 _llm_instance: CachedQueuedChatOpenAI | None = None
-_chat_provider: OpenAIChatProvider | None = None
+_chat_provider: ChatProvider | None = None
 _chat_queue: PriorityChatQueue | None = None
 _shared_cache: SQLiteCache | None = None
 
@@ -47,19 +48,19 @@ def get_llm(settings: Settings = Depends(get_settings)) -> CachedQueuedChatOpenA
     return build_llm(settings)
 
 
-def build_chat_provider(settings: Settings) -> OpenAIChatProvider:
+def build_chat_provider(settings: Settings) -> ChatProvider:
     global _chat_provider
     if _chat_provider is None:
         _chat_provider = OpenAIChatProvider(settings, cache=build_cache(settings))
     return _chat_provider
 
 
-def get_chat_provider(settings: Settings = Depends(get_settings)) -> OpenAIChatProvider:
+def get_chat_provider(settings: Settings = Depends(get_settings)) -> ChatProvider:
     return build_chat_provider(settings)
 
 
 def build_chat_queue(
-    settings: Settings, provider: OpenAIChatProvider
+    settings: Settings, provider: ChatProvider
 ) -> PriorityChatQueue:
     global _chat_queue
     if _chat_queue is None:
@@ -74,7 +75,7 @@ def build_chat_queue(
 
 def get_chat_queue(
     settings: Settings = Depends(get_settings),
-    provider: OpenAIChatProvider = Depends(get_chat_provider),
+    provider: ChatProvider = Depends(get_chat_provider),
 ) -> PriorityChatQueue:
     return build_chat_queue(settings, provider)
 
