@@ -389,7 +389,7 @@ compose_services_from_file() {
 
 completion_service_names() {
   local project_dir compose_file
-  project_dir="$(resolve_project_dir)" || return 0
+  project_dir="$(resolve_project_dir_soft)" || return 0
   compose_file="${project_dir}/compose.yaml"
   [[ -f "$compose_file" ]] || return 0
 
@@ -979,11 +979,11 @@ compose_logs() {
   fi
 
   docker_available || die "docker not found"
-  local project_name containers
+  local project_name
+  local -a containers=()
   project_name="${PROG}-${name}"
 
   if [[ "${#services[@]}" -gt 0 ]]; then
-    containers=()
     local svc list
     for svc in "${services[@]}"; do
       list="$(docker ps -aq --filter "label=com.docker.compose.project=${project_name}" --filter "label=com.docker.compose.service=${svc}" || true)"
@@ -992,13 +992,12 @@ compose_logs() {
       fi
     done
   else
-    containers="$(docker ps -aq --filter "label=com.docker.compose.project=${project_name}" || true)"
+    mapfile -t containers < <(docker ps -aq --filter "label=com.docker.compose.project=${project_name}" || true)
   fi
 
-  if [[ -z "$containers" ]]; then
+  if [[ "${#containers[@]}" -eq 0 ]]; then
     die "no containers found for project ${project_name}; profile may be stopped or invalid"
   fi
-  mapfile -t containers <<<"$containers"
   if [[ "${#containers[@]}" -gt 1 ]]; then
     echo "Multiple containers found for project ${project_name}; following most recent: ${containers[0]}" >&2
     echo "Other containers:" >&2
