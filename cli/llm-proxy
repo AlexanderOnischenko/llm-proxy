@@ -395,7 +395,7 @@ _llm_proxy_completions() {
   case "${prev}" in
     use|switch|up|debug|down|status|delete|edit|edit-compose)
       local profiles
-      profiles="$("${COMP_WORDS[0]}" __complete profiles 2>/dev/null)"
+      profiles="$("${COMP_WORDS[0]}" __complete profiles 2>/dev/null | tr '\n' ' ')"
       COMPREPLY=( $(compgen -W "$profiles" -- "$cur") )
       return 0
       ;;
