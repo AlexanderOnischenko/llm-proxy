@@ -320,6 +320,42 @@ completion_profiles() {
   list_profile_names
 }
 
+commands_list() {
+  cat <<'EOF'
+help
+list
+ls
+active
+init
+create
+use
+switch
+edit
+edit-compose
+up
+start
+run
+debug
+down
+stop
+status
+logs
+delete
+rm
+remove
+paths
+install
+uninstall
+reinstall
+completion
+EOF
+}
+
+completion_commands() {
+  # Prints one command per line for completion consumers.
+  commands_list
+}
+
 completion_script_bash() {
   cat <<'EOF'
 _llm_proxy_completions() {
@@ -330,7 +366,9 @@ _llm_proxy_completions() {
   local cmd="${COMP_WORDS[1]:-}"
 
   if [[ $COMP_CWORD -eq 1 ]]; then
-    COMPREPLY=( $(compgen -W "help list active init create use switch edit edit-compose up debug down status logs delete install uninstall reinstall completion" -- "$cur") )
+    local cmds
+    cmds="$("${COMP_WORDS[0]}" __complete commands 2>/dev/null | tr '\n' ' ')"
+    COMPREPLY=( $(compgen -W "$cmds" -- "$cur") )
     return 0
   fi
 
@@ -375,27 +413,7 @@ completion_script_zsh() {
 
 _llm_proxy() {
   local -a commands
-  commands=(
-    'help:Show help'
-    'list:List profiles'
-    'active:Show active profile'
-    'init:Create + use + edit runtime env'
-    'create:Create profile'
-    'use:Use profile'
-    'switch:Switch profile'
-    'edit:Edit runtime env'
-    'edit-compose:Edit compose env'
-    'up:Start profile'
-    'debug:Start profile in debug mode'
-    'down:Stop profile'
-    'status:Show status'
-    'logs:Show logs'
-    'delete:Delete profile'
-    'install:Install binary'
-    'uninstall:Uninstall binary'
-    'reinstall:Reinstall binary'
-    'completion:Generate completion script'
-  )
+  commands=(${(f)$(_call_program commands "$words[1]" __complete commands)})
 
   local context state state_descr line
   _arguments -C \
@@ -440,6 +458,10 @@ EOF
 
 completion_script_fish() {
   cat <<'EOF'
+function __llm_proxy_complete_commands
+  llm-proxy __complete commands 2>/dev/null
+end
+
 function __llm_proxy_complete_profiles
   llm-proxy __complete profiles 2>/dev/null
 end
@@ -448,7 +470,7 @@ function __llm_proxy_complete_services
   llm-proxy __complete services 2>/dev/null
 end
 
-complete -c llm-proxy -n "__fish_use_subcommand" -a "help list active init create use switch edit edit-compose up debug down status logs delete install uninstall reinstall completion" -d "commands"
+complete -c llm-proxy -n "__fish_use_subcommand" -a "(__llm_proxy_complete_commands)" -d "commands"
 complete -c llm-proxy -n "__fish_seen_subcommand_from use switch up debug down status logs delete edit edit-compose" -a "(__llm_proxy_complete_profiles)"
 complete -c llm-proxy -n "__fish_seen_subcommand_from logs" -a "(__llm_proxy_complete_services)"
 complete -c llm-proxy -n "__fish_seen_subcommand_from completion" -a "bash zsh fish"
@@ -861,6 +883,7 @@ main() {
     __complete)
       local target="${1:-}"
       case "$target" in
+        commands) completion_commands ;;
         profiles) completion_profiles ;;
         services) completion_service_names ;;
         *) exit 0 ;;
