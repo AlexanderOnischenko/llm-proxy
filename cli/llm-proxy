@@ -590,14 +590,16 @@ validate_runtime_env_or_die() {
 
 validate_compose_env_or_die() {
   local name="$1"
-  local compose_env; compose_env="$(profile_compose_env_path "$name")"
-  [[ -f "$compose_env" ]] || die "profile not found: $name (missing compose env: $compose_env)"
+  local compose_env runtime_env
+  compose_env="$(profile_compose_env_path "$name")"
+  runtime_env="$(profile_runtime_env_path "$name")"
+  [[ -f "$compose_env" ]] || die "profile not found: $name (compose env missing)\ncompose env: $compose_env\nruntime env: $runtime_env\nrun: llm-proxy edit-compose $name"
 
   # These vars are required for safe volume binding (compose interpolation).
   local v
   for v in CACHE_HOST_DIR CACHE_CONTAINER_DIR; do
     if ! envfile_get "$compose_env" "$v" >/dev/null 2>&1; then
-      die "missing required $v in $compose_env (run: llm-proxy edit $name, or recreate profile)"
+      die "missing required $v in compose env\ncompose env: $compose_env\nruntime env: $runtime_env\nrun: llm-proxy edit-compose $name"
     fi
   done
 }
