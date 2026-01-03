@@ -543,7 +543,7 @@ validate_runtime_env_soft() {
   [[ -n "$service" ]] || return 1
 
   local v
-  for v in CACHE_HOST_DIR CACHE_CONTAINER_DIR; do
+  for v in CACHE_HOST_DIR CACHE_CONTAINER_DIR LOGS_HOST_DIR LOGS_CONTAINER_DIR; do
     if ! envfile_get "$compose_env" "$v" >/dev/null 2>&1; then
       return 1
     fi
@@ -597,7 +597,7 @@ validate_compose_env_or_die() {
 
   # These vars are required for safe volume binding (compose interpolation).
   local v
-  for v in CACHE_HOST_DIR CACHE_CONTAINER_DIR; do
+  for v in CACHE_HOST_DIR CACHE_CONTAINER_DIR LOGS_HOST_DIR LOGS_CONTAINER_DIR; do
     if ! envfile_get "$compose_env" "$v" >/dev/null 2>&1; then
       die "missing required $v in compose env\ncompose env: $compose_env\nruntime env: $runtime_env\nrun: llm-proxy edit-compose $name"
     fi
