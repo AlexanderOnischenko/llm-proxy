@@ -389,7 +389,7 @@ compose_services_from_file() {
 
 completion_service_names() {
   local project_dir compose_file
-  project_dir="$(resolve_project_dir)" || return 0
+  project_dir="$(resolve_project_dir_soft)" || return 0
   compose_file="${project_dir}/compose.yaml"
   [[ -f "$compose_file" ]] || return 0
 
