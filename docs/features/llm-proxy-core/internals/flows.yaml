@@ -1,0 +1,281 @@
+logical_view_result:
+  logical_components_map:
+    - name: llm.routers.chat
+      stuctural:
+      layer: controller
+      type: existing
+      scope: llm-proxy-core
+      dependencies: [PriorityMapping, 
+        PriorityChatQueue, 
+        llm.services.chat_provider.OpenAIChatProvider, 
+        Settings, 
+        llm.deps
+      ]
+      semantic:
+        responsibility: Принимает /v1/chat/completions и /v1/chat/invoke, валидирует и нормализует запрос, запрещает stream, извлекает приоритет, формирует request_id, передаёт в очередь и оформляет ответ с метриками
+        public_interfaces: ["POST /v1/chat/completions", "POST /v1/chat/invoke"]
+        interacts_with: [PriorityChatQueue, PriorityMapping, Settings, llm.services.chat_provider.OpenAIChatProvider]
+    - name: llm.routers.llm
+      stuctural:
+        layer: controller
+        type: existing
+        scope: llm-proxy-core
+        dependencies: [PriorityMapping, PriorityChatQueue, llm.services.chat_provider.OpenAIChatProvider, Settings, llm.deps]
+      semantic:
+        responsibility: Принимает LangChain /llm, нормализует к ChatCompletionRequest, запрещает stream, назначает приоритет и передаёт в очередь, возвращает ответ и метрики
+        public_interfaces: ["POST /llm"]
+        interacts_with: [PriorityChatQueue, PriorityMapping, Settings]
+    - name: llm.metrics.prometheus.router
+      stuctural:
+        layer: controller
+        type: existing
+        scope: llm-proxy-core
+        dependencies: [PriorityChatQueue, llm.deps, Settings]
+      semantic:
+        responsibility: Отдаёт /metrics с состоянием очереди и задержек из PriorityChatQueue без изменения состояния
+        public_interfaces: ["GET /metrics"]
+        interacts_with: [PriorityChatQueue]
+    - name: admin.routers.queue
+      stuctural:
+        layer: controller
+        type: existing
+        scope: llm-proxy-core
+        dependencies: [PriorityChatQueue, llm.deps, Settings]
+      semantic:
+        responsibility: Предоставляет read-only снимок очереди операторам
+        public_interfaces: ["GET /admin/queue"]
+        interacts_with: [PriorityChatQueue]
+    - name: admin.routers.concurrency
+      stuctural:
+        layer: controller
+        type: existing
+        scope: llm-proxy-core
+        dependencies: [ConcurrencyConfigManager, PriorityChatQueue, llm.deps, Settings]
+      semantic:
+        responsibility: Принимает и применяет изменения лимитов конкурентности и дефолтного приоритета
+        public_interfaces: ["GET /admin/concurrency", "PATCH /admin/concurrency"]
+        interacts_with: [ConcurrencyConfigManager, PriorityChatQueue]
+    - name: PriorityChatQueue
+      stuctural:
+        layer: domain
+        type: existing
+        scope: llm-proxy-core
+        dependencies: [PriorityMapping, ConcurrencyConfigManager]
+      semantic:
+        responsibility: Применяет лимиты приоритетов, принимает/отклоняет запросы, измеряет задержки, управляет inflight, отдаёт snapshot
+        public_interfaces: ["enqueue(request_id, priority, payload, endpoint)", "snapshot()", "update_limits(new_limits, default_priority)"]
+        interacts_with: [llm.routers.chat, llm.routers.llm, llm.services.chat_provider.OpenAIChatProvider]
+    - name: PriorityMapping
+      stuctural:
+        layer: domain
+        type: existing
+        scope: llm-proxy-core
+        dependencies: []
+      semantic:
+        responsibility: Нормализует входной приоритет с учётом дефолта и отключённых значений
+        public_interfaces: ["resolve(input_priority, queue_priorities, default_priority)"]
+        interacts_with: [PriorityChatQueue, llm.routers.chat, llm.routers.llm]
+    - name: ConcurrencyConfigManager
+      stuctural:
+        layer: application
+        type: existing
+        scope: llm-proxy-core
+        dependencies: [Settings]
+      semantic:
+        responsibility: Хранит и версионирует конфигурацию приоритетов и max_queue, применяет обновления к очереди
+        public_interfaces: ["get_state()", "apply_update(slots_by_priority, default_priority, updated_by)"]
+        interacts_with: [PriorityChatQueue, admin.routers.concurrency]
+    - name: llm.services.chat_provider.OpenAIChatProvider
+      stuctural:
+        layer: infrastructure
+        type: existing
+        scope: llm-proxy-core
+        dependencies: [Settings]
+      semantic:
+        responsibility: Выполняет вызовы upstream провайдера или кэша по нормализованному запросу
+        public_interfaces: ["invoke_chat(request)"]
+        interacts_with: [PriorityChatQueue, llm.routers.chat, llm.routers.llm]
+    - name: Settings
+      stuctural:
+        layer: infrastructure
+        type: existing
+        scope: shared
+        dependencies: []
+      semantic:
+        responsibility: Предоставляет конфигурацию очереди, дефолтов модели и кэша
+        public_interfaces: ["load()", "get_llm_defaults()", "get_priority_limits()"]
+        interacts_with: [llm.routers.chat, llm.routers.llm, PriorityChatQueue, ConcurrencyConfigManager, llm.services.chat_provider.OpenAIChatProvider]
+    - name: llm.deps
+      stuctural:
+        layer: infrastructure
+        type: existing
+        scope: llm-proxy-core
+        dependencies: [PriorityChatQueue, llm.services.chat_provider.OpenAIChatProvider, Settings, ConcurrencyConfigManager]
+      semantic:
+        responsibility: Предоставляет DI для роутеров и сервисов, инициализируя singletons
+        public_interfaces: ["get_priority_queue()", "get_chat_provider()", "get_settings()", "get_concurrency_config_manager()"]
+        interacts_with: [llm.routers.chat, llm.routers.llm, llm.metrics.prometheus.router, admin.routers.queue, admin.routers.concurrency]
+    - name: llm.main
+      stuctural:
+        layer: application
+        type: existing
+        scope: llm-proxy-core
+        dependencies: [llm.deps, Settings]
+      semantic:
+        responsibility: Выполняет стартовые проверки однопроцессного режима, собирает приложение и регистрирует зависимости
+        public_interfaces: ["create_app()", "startup_checks()"]
+        interacts_with: [llm.routers.chat, llm.routers.llm, llm.metrics.prometheus.router, admin.routers.queue, admin.routers.concurrency]
+  layered_flows:
+    - use_case: UC-1
+      steps:
+        - layer: controller
+          component: llm.routers.chat
+          action: Принять POST чат-запрос, валидация тела и stream, извлечь/подставить приоритет и request_id
+        - layer: domain
+          component: PriorityMapping
+          action: Нормализовать приоритет с учётом допустимых значений и дефолта
+        - layer: domain
+          component: PriorityChatQueue
+          action: Проверить вместимость max_queue и inflight, принять или отклонить enqueue, зафиксировать задержку
+        - layer: infrastructure
+          component: llm.services.chat_provider.OpenAIChatProvider
+          action: Выполниь вызов провайдера или получить из кэша, вернуть результат
+        - layer: domain
+          component: PriorityChatQueue
+          action: Освободить слот, обновить метрики задержек и исхода
+        - layer: controller
+          component: llm.routers.chat
+          action: Сформировать ответ с request_id и метриками в заголовках
+    - use_case: UC-2
+      steps:
+        - layer: controller
+          component: llm.routers.chat
+          action: Принять POST invoke, валидация тела и stream, назначить приоритет и request_id
+        - layer: domain
+          component: PriorityMapping
+          action: Нормализовать приоритет invoke-запроса
+        - layer: domain
+          component: PriorityChatQueue
+          action: Применить лимиты очереди/inflight, принять или отклонить запрос
+        - layer: infrastructure
+          component: llm.services.chat_provider.OpenAIChatProvider
+          action: Выполнить запрос к провайдеру или кэшу, измерить латентность
+        - layer: domain
+          component: PriorityChatQueue
+          action: Обновить метрики очереди и освободить слот
+        - layer: controller
+          component: llm.routers.chat
+          action: Вернуть результат и метрики в теле и заголовках
+    - use_case: UC-3
+      steps:
+        - layer: controller
+          component: llm.routers.llm
+          action: Принять POST /llm, адаптировать LangChain payload к ChatCompletionRequest, запретить stream, назначить приоритет и request_id
+        - layer: domain
+          component: PriorityMapping
+          action: Нормализовать приоритет адаптированного запроса
+        - layer: domain
+          component: PriorityChatQueue
+          action: Проверить и занести запрос в очередь с учётом лимитов
+        - layer: infrastructure
+          component: llm.services.chat_provider.OpenAIChatProvider
+          action: Выполнить вызов провайдера с нормализованным запросом и кэшем
+        - layer: domain
+          component: PriorityChatQueue
+          action: Обновить задержки и освободить слот
+        - layer: controller
+          component: llm.routers.llm
+          action: Вернуть LangChain-совместимый ответ с request_id и метриками
+    - use_case: UC-4
+      steps:
+        - layer: controller
+          component: llm.metrics.prometheus.router
+          action: Принять GET /metrics
+        - layer: domain
+          component: PriorityChatQueue
+          action: Сформировать snapshot очереди и метрик без изменения состояния
+        - layer: controller
+          component: llm.metrics.prometheus.router
+          action: Вернуть Prometheus-представление метрик
+    - use_case: UC-5
+      steps:
+        - layer: application
+          component: llm.main
+          action: Выполнить проверки однопроцессного режима и инициализацию приложения
+        - layer: infrastructure
+          component: llm.deps
+          action: Создать singletons очереди, провайдера, настроек и конфигурации конкурентности
+        - layer: domain
+          component: PriorityChatQueue
+          action: Инициализировать лимиты и готовность очереди к приёму запросов
+        - layer: controller
+          component: llm.routers.chat
+          action: Маршруты становятся доступными после успешного старта
+  interfaces_and_contracts:
+    - from_layer: controller
+      to_layer: domain
+      contract:
+        dto: ChatCompletionRequestDTO
+        interface: PriorityChatQueue.enqueue
+        visibility: internal
+    - from_layer: controller
+      to_layer: domain
+      contract:
+        dto: LangChainLLMRequestDTO
+        interface: PriorityChatQueue.enqueue
+        visibility: internal
+    - from_layer: domain
+      to_layer: infrastructure
+      contract:
+        dto: CanonicalChatRequest
+        interface: llm.services.chat_provider.OpenAIChatProvider.invoke_chat
+        visibility: internal
+    - from_layer: controller
+      to_layer: domain
+      contract:
+        dto: PriorityInput
+        interface: PriorityMapping.resolve
+        visibility: internal
+    - from_layer: controller
+      to_layer: domain
+      contract:
+        dto: MetricsSnapshotRequest
+        interface: PriorityChatQueue.snapshot
+        visibility: internal
+  state_model:
+    - entity: LLMRequest
+      storage: in-memory queue and execution context
+      lifecycle: transient
+      versioning: false
+      soft_delete: false
+      consistency: strong
+    - entity: PriorityLimits
+      storage: in-memory config state
+      lifecycle: persistent
+      versioning: true
+      soft_delete: false
+      consistency: strong
+    - entity: QueueMetricsSnapshot
+      storage: in-memory derived
+      lifecycle: transient
+      versioning: false
+      soft_delete: false
+      consistency: none
+  context_boundaries:
+    - source: llm.routers.llm
+      target: llm.routers.chat
+      acl: false
+      mapper: LangChain to ChatCompletion normalization
+    - source: controller
+      target: domain
+      acl: false
+      mapper: PriorityMapping for priority normalization
+  risks:
+    - rule: Layered dependency direction
+      description: Контроллер может попытаться вызывать провайдера напрямую, минуя очередь, что нарушит приоритеты и метрики
+      mitigation: Зафиксировать контракт контроллер → PriorityChatQueue, запретить обход через ревью и тесты
+    - rule: Single-process invariant
+      description: Нарушение проверки однопроцессного режима приведёт к некорректным метрикам и лимитам
+      mitigation: Стартовые проверки в llm.main и автотесты на отсутствие PROMETHEUS_MULTIPROC_DIR
+
+
