@@ -1,0 +1,101 @@
+components:
+  - name: PriorityChatQueue
+    structural:
+      layer: TBD
+      type: new
+      scope: TBD
+      dependencies: []
+      needs_logical_view: true
+    semantic:
+      responsibility: "Управляет приоритетными слотами и глубиной очереди чат-запросов, измеряет задержки и обновляет метрики приемки/выполнения."
+      public_interfaces:
+        - enqueue(request_id, priority, payload, endpoint)
+        - snapshot()
+      interacts_with:
+        - llm.routers.chat
+        - llm.routers.llm
+        - llm.services.chat_provider.OpenAIChatProvider
+  - name: llm.routers.chat
+    structural:
+      layer: TBD
+      type: new
+      scope: TBD
+      dependencies: []
+      needs_logical_view: true
+    semantic:
+      responsibility: "Обрабатывает POST /v1/chat/completions и /v1/chat/invoke: валидирует тело, нормализует приоритет, ставит запросы в очередь и возвращает ответы с метриками очереди."
+      public_interfaces:
+        - POST /v1/chat/completions
+        - POST /v1/chat/invoke
+      interacts_with:
+        - PriorityChatQueue
+        - llm.services.chat_provider.OpenAIChatProvider
+        - llm.deps
+  - name: llm.routers.llm
+    structural:
+      layer: TBD
+      type: new
+      scope: TBD
+      dependencies: []
+      needs_logical_view: true
+    semantic:
+      responsibility: "Адаптирует LangChain-совместимые вызовы /llm к ChatCompletionRequest, применяет приоритет и очередь, возвращает ответы с метаданными выполнения."
+      public_interfaces:
+        - POST /llm
+      interacts_with:
+        - PriorityChatQueue
+        - llm.services.chat_provider.OpenAIChatProvider
+        - llm.deps
+  - name: llm.services.chat_provider.OpenAIChatProvider
+    structural:
+      layer: TBD
+      type: new
+      scope: TBD
+      dependencies: []
+      needs_logical_view: true
+    semantic:
+      responsibility: "Вызывает upstream OpenAI-подобного провайдера с применением настроек по умолчанию и общего кэша, формирует ответы с идентификатором запроса и метриками."
+      public_interfaces:
+        - invoke_chat(request)
+      interacts_with:
+        - PriorityChatQueue
+        - llm.routers.chat
+        - llm.routers.llm
+        - llm.deps
+  - name: llm.deps
+    structural:
+      layer: TBD
+      type: new
+      scope: TBD
+      dependencies: []
+      needs_logical_view: true
+    semantic:
+      responsibility: "Инициализирует и предоставляет singleton-зависимости (кэш, провайдер, очередь, настройки) для FastAPI маршрутов."
+      public_interfaces:
+        - get_priority_queue()
+        - get_chat_provider()
+        - get_settings()
+      interacts_with:
+        - PriorityChatQueue
+        - llm.services.chat_provider.OpenAIChatProvider
+        - llm.routers.chat
+        - llm.routers.llm
+        - llm.main
+  - name: llm.main
+    structural:
+      layer: TBD
+      type: new
+      scope: TBD
+      dependencies: []
+      needs_logical_view: true
+    semantic:
+      responsibility: "Запускает FastAPI приложение, регистрирует маршруты и зависимости, выполняет проверки однопроцессного режима и экспонирует метрики."
+      public_interfaces:
+        - create_app()
+        - startup_checks()
+      interacts_with:
+        - llm.routers.chat
+        - llm.routers.llm
+        - llm.deps
+        - PriorityChatQueue
+        - llm.services.chat_provider.OpenAIChatProvider
