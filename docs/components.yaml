@@ -7,19 +7,40 @@ components:
       dependencies: []
       needs_logical_view: true
     semantic:
-      responsibility: "Управляет приоритетными слотами и глубиной очереди чат-запросов, хранит допустимые приоритеты и дефолт, отклоняет заявки с отключёнными приоритетами, измеряет задержки и обновляет метрики приемки/выполнения, атомарно применяет обновлённую карту слотов без пересоздания очереди, предоставляет snapshot() для read-only наблюдения."
+      responsibility: "Управляет приоритетными FIFO очередями admitted-запросов, strict-priority выбором и глубиной очереди, применяет max_queue и overflow-правила (включая max_queue == 0), удерживает счётчики queued/inflight, предоставляет детерминированное dequeue/claim API для execution loop, поддерживает удаление queued задач при cancel, измеряет задержки и метрики enqueue/dequeue/outcome, атомарно применяет обновлённую карту слотов и default_priority без пересоздания очереди, предоставляет snapshot() для read-only наблюдения."
       public_interfaces:
         - enqueue(request_id, priority, payload, endpoint)
+        - dequeue_next()
         - snapshot()
         - update_limits(new_limits, default_priority)
       interacts_with:
         - llm.routers.chat
         - llm.routers.llm
         - llm.services.chat_provider.OpenAIChatProvider
+        - PriorityExecutionEngine
         - PriorityMapping
         - ConcurrencyConfigManager
         - admin.routers.concurrency
         - admin.routers.queue
+        - llm.metrics.prometheus.router
+  - name: PriorityExecutionEngine
+    structural:
+      layer: TBD
+      type: new
+      scope: TBD
+      dependencies: []
+      needs_logical_view: true
+    semantic:
+      responsibility: "Выполняет детерминированный цикл dequeue → захват слота → запуск handler (с выбранной точкой cache/dedup) → фиксация outcome → освобождение слота, соблюдая strict priority, inflight-квоты и max_queue инварианты; гарантирует освобождение слота при любых исходах, обрабатывает cancel для queued/inflight, возвращает overflow 429 при невозможности буферизации, эмитит события enqueue/dequeue/overflow/outcome и поддерживает snapshot состояния исполнителя."
+      public_interfaces:
+        - run_once()
+        - handle_cancellation(request_id)
+        - snapshot()
+      interacts_with:
+        - PriorityChatQueue
+        - CacheDedupLayer
+        - llm.services.chat_provider.OpenAIChatProvider
+        - ConcurrencyConfigManager
         - llm.metrics.prometheus.router
   - name: llm.routers.chat
     structural:
@@ -80,7 +101,7 @@ components:
       dependencies: []
       needs_logical_view: true
     semantic:
-      responsibility: "Экспортирует Prometheus-совместимые метрики очереди и провайдера (глубина, inflight, latency, overflow, исходы), собираемые из PriorityChatQueue без изменения её состояния."
+      responsibility: "Экспортирует Prometheus-совместимые метрики очереди и провайдера (глубина, inflight, latency, overflow, исходы), потребляет детерминированные события enqueue/dequeue/outcome/overflow и snapshots из PriorityChatQueue и PriorityExecutionEngine без изменения их состояния."
       public_interfaces:
         - GET /metrics
       interacts_with:
@@ -88,6 +109,7 @@ components:
         - llm.deps
         - ConcurrencyConfigManager
         - Settings
+        - PriorityExecutionEngine
   - name: admin.routers.queue
     structural:
       layer: TBD
@@ -125,6 +147,7 @@ components:
         - ConcurrencyConfigManager
         - llm.metrics.prometheus.router
         - admin.routers.queue
+        - PriorityExecutionEngine
         - llm.main
         - Settings
   - name: llm.main
@@ -176,6 +199,7 @@ components:
         - apply_update(slots_by_priority, default_priority, updated_by)
       interacts_with:
         - PriorityChatQueue
+        - PriorityExecutionEngine
         - llm.deps
         - admin.routers.concurrency
         - Settings
@@ -217,3 +241,21 @@ components:
         - ConcurrencyConfigManager
         - llm.metrics.prometheus.router
         - admin.routers.queue
+        - PriorityExecutionEngine
+  - name: CacheDedupLayer
+    structural:
+      layer: TBD
+      type: new
+      scope: TBD
+      dependencies: []
+      needs_logical_view: true
+    semantic:
+      responsibility: "Выполняет cache и in-flight deduplication на каноническом provider payload, выбирая фиксированную точку подключения (до enqueue или внутри handler) без нарушения strict priority/max_queue, объединяет идентичные запросы в shared future, исключает кэширование ошибочных upstream ответов или применяет явный TTL по политике, эмитит события для метрик."
+      public_interfaces:
+        - get_or_resolve(request_id, canonical_payload, execute_fn)
+        - evict_on_policy(payload)
+      interacts_with:
+        - PriorityExecutionEngine
+        - PriorityChatQueue
+        - llm.services.chat_provider.OpenAIChatProvider
+        - Settings
