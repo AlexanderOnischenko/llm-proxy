@@ -83,10 +83,6 @@ def create_app() -> FastAPI:
     if settings.debug:
         app.add_middleware(DebugRequestLoggingMiddleware, max_body_bytes=4096)
 
-    @app.get("/health", tags=["health"], status_code=status.HTTP_200_OK)
-    async def health():
-        return {"status": "ok"}
-
     app.include_router(llm_router, tags=["llm"])
     app.include_router(chat_router, tags=["chat"])
     app.include_router(metrics_router, tags=["metrics"])
