@@ -1,92 +1,92 @@
-# Feature: SOCKS Proxy Transport for Chat Providers
+# Feature: Deterministic SOCKS5 Transport for Provider Traffic
 
 ## Problem Statement
-Добавить поддержку SOCKS5‑прокси на транспортном уровне для всех chat‑провайдеров, сохраняя обратную совместимость и прозрачность маршрутизации запросов при прямом соединении или через прокси.
+SOCKS5‑транспорт должен применяться как детерминированная политика по каждому провайдеру: вся исходящая связь к апстримам либо гарантированно идёт через заданный SOCKS5 (с учётом per‑provider правил), либо явно отклоняется без неочевидных фолбеков. Система обязана различать ошибки SOCKS и ошибки провайдера, предоставлять наблюдаемость и диагностику без утечек секрета аутентификации и без деградации TLS/mTLS семантики.
 
 ## Users / Actors
-- Операторы/SRE, управляющие глобальными настройками прокси и проверяющие его здоровье.
-- Разработчики интеграций/провайдеров, использующие фабрику HTTP‑клиентов без необходимости знать о наличии SOCKS.
-- Клиентские приложения косвенно, через надёжное выполнение запросов и диагностируемые ошибки транспорта.
+- Операторы/SRE: включают или запрещают SOCKS, настраивают DNS/NO_PROXY, контролируют строгий режим, читают статус/doctor, следят за метриками фолбеков.
+- Разработчики провайдеров: используют фабрику HTTP‑клиентов с прозрачной политикой SOCKS и предсказуемыми ошибками транспорта.
+- Клиентские приложения/пользователи: получают корректный ответ или предсказуемую ошибку транспорта без смешения с ошибками апстрима.
 
 ## Use Cases
-- Оператор включает SOCKS5 и задаёт endpoint/аутентификацию для всего трафика, сохраняя OpenAI‑совместимые API без изменений.
-- Провайдер, настроенный с `socks: inherit`, автоматически использует прокси при его доступности либо падает в строгом режиме.
-- Провайдер с `socks: disable` всегда ходит напрямую, даже если глобально SOCKS включён.
-- Провайдер с `socks: force` должен полностью заваливаться на ошибках прокси, без фолбека на прямое соединение.
-- CLI `llm-proxy status` и `llm-proxy doctor` показывают состояние SOCKS, соединения и аутентификации для диагностики инцидентов.
+- Глобальное включение SOCKS5 с учётом аутентификации; провайдеры по умолчанию наследуют политику.
+- Провайдер `socks=force` требует маршрут только через SOCKS, даже если глобально выключено, и падает на любой недоступности прокси.
+- Провайдер `socks=disable` всегда идёт напрямую, игнорируя глобальную настройку.
+- Конфигурация NO_PROXY для локальных/внутренних доменов и подсетей: «через SOCKS всё, кроме перечисленного».
+- Управляемое разрешение DNS: локальное или через SOCKS (remote DNS) для избежания утечек приватных доменов.
+- Диагностика `status` показывает кэшированный результат и итоговую («effective») политику провайдера; `doctor` выполняет активные проверки соединения, аутентификации и egress.
+- Метрики отражают использование SOCKS, ошибки и количество фолбеков с классификацией причин.
 
 ## Feature Boundary & Responsibility
-Фича отвечает за транспортный выбор и конфигурацию SOCKS‑прокси (вкл/выкл, strict/fallback, аутентификация, таймауты), за построение HTTP‑клиента для провайдеров и за наблюдаемость/диагностику статуса прокси. Она не меняет логику провайдеров, формирование payload или политику очереди.
+- **Принимает решения**: какой транспорт применить (SOCKS vs direct) per‑provider с учётом глобальной политики, strict/force семантики, NO_PROXY, DNS‑режима и таймаутов; как классифицировать ошибки и что отдавать в диагностике; когда выполнять фолбек.
+- **Не принимает решения**: не меняет payload/маршруты провайдера, не подменяет TLS/mTLS, не выбирает приоритеты/очереди, не исполняет контроль плоскость конкурентности.
+- Фича — **решатель транспорта**: предоставляет готовый HTTP‑клиент и диагностические гарантии; провайдеры остаются потребителями готового транспорта.
 
 ## Execution Phase
-Transport / Connectivity (выбор и построение транспорта перед вызовом апстрим‑провайдера).
+Primary: **Execution / Transport setup** — перед установкой исходящего соединения к апстриму. Наблюдаемость (status/doctor) работает read‑only и не меняет рабочих клиентов.
 
 ## Conceptual Inputs & Outputs
-### Inputs (conceptual)
-- Глобальная конфигурация SOCKS (`LLM_SOCKS_*`: enabled/type/host/port/auth/strict/connect/read timeouts).
-- Политика провайдера: `socks` ∈ {inherit, disable, force}.
-- Запрос провайдера к апстриму (endpoint/URL) и контекст логирования.
+### Inputs
+- Глобальные переменные окружения `LLM_SOCKS_*` (включая enable/host/port/auth/strict/таймауты, DNS режим, NO_PROXY, тестовый endpoint).
+- Провайдерская политика `socks ∈ {inherit, disable, force}`.
+- Целевой хост/URL апстрима для маршрутизации и проверки NO_PROXY.
+- Режим выполнения запроса (обычный/streaming) для выбора таймаутов чтения.
 
-### Outputs (conceptual)
-- Сконфигурированный HTTP‑клиент/транспорт: direct или socks5.
-- Решение о фолбеке или аварийной остановке в зависимости от strict/force.
-- Диагностические записи (INFO/WARN/ERROR/DEBUG) и результаты health‑проверок для CLI/status/doctor.
-- Ошибки транспорта, различающие `SOCKS_CONNECT_ERROR`, `SOCKS_AUTH_ERROR`, `SOCKS_TIMEOUT` без подмены на ошибки провайдера.
+### Outputs
+- Решение о транспорте: direct или SOCKS5, с выбранным DNS‑режимом и применёнными таймаутами.
+- Классифицированный исход (success | unavailable | reachable_no_egress | auth_failed | timeout | blocked_by_no_proxy) для применения фолбека/ошибки и для метрик.
+- Диагностический снапшот (конфигурация без секретов, статус последней проверки, timestamp, effective‑policy, результат активного теста doctor).
+- Метрики: requests/errors/transport usage + `llm_socks_fallback_total{provider,reason}`.
 
 ## Proposed Solution
+- **Settings/SocksSettings**: расширить загрузку окружения `LLM_SOCKS_*` новыми полями `NO_PROXY`, `REMOTE_DNS`, `TEST_URL`, `STRICT`, таймаутами (`CONNECT_TIMEOUT`, `READ_TIMEOUT`, `STREAM_READ_TIMEOUT`) и auth. Хранить флаг enabled и вычислять effective политику per provider (force overrides global disable).
+- **Transport factory**: создаёт HTTP‑клиенты с SOCKS5 либо direct. Учитывает NO_PROXY (bypass на уровне резолва цели), применяет remote DNS флаг, подключает таймауты/ретраи, различает streaming таймаут чтения. Возвращает причину недоступности в явных кодах.
+- **Diagnostics**: `status` использует кэш последней проверки с timestamp, `doctor` проводит активные проверки (resolve, TCP connect, SOCKS handshake/auth, egress HEAD/GET на TEST_URL с коротким таймаутом). Пароли никогда не логируются/не выводятся; username опционально маскируется.
+- **Observability**: обновить счётчики `llm_socks_requests_total`, `llm_socks_errors_total{reason}`, `llm_socks_fallback_total{provider,reason}` и `llm_requests_transport{transport}`. Логирование WARN при фолбеке, ERROR при fail‑fast.
+- **CLI/UX**: `status` и `doctor` показывают effective политику per provider (inherit/disable/force + strict/fallback), remote DNS режим, NO_PROXY список (если есть), результат проверки доступности и egress. Отдельно отображать различие «reachable, but no egress».
+- **TLS/mTLS integrity**: транспорт не трогает сертификаты/ключи; ошибки TLS handshake репортятся отдельно от SOCKS‑доступности.
 
-### Affected Components
-- Новый конфиг‑слой: `SocksSettings` (отражает `LLM_SOCKS_*`) + глобальный флаг enable/strict/таймауты/аутентификация/endpoint.
-- Фабрика транспорта/клиента (`http_client_factory`): строит direct или socks5 транспорт в зависимости от политики провайдера и глобальных настроек; проксирует таймауты/ретраи.
-- Провайдеры (например, `OpenAIChatProvider`): получают готовый HTTP‑клиент и не содержат логики SOCKS.
-- CLI/UX (`llm-proxy status`, `llm-proxy doctor`): добавляют секцию SOCKS с конфигурацией, результатом tcp connect/auth/outbound теста и строгим/нестрогим статусом.
-- Логирование/метрики: записи INFO/WARN/ERROR/DEBUG, новые счётчики `llm_socks_requests_total`, `llm_socks_errors_total`, `llm_requests_transport`.
-
-### Data Models
-- Требуется: `SocksSettings` — enabled/type/host/port/username/password/strict/connect_timeout/read_timeout.
-- Требуется: `SocksPolicy` для провайдеров — enum {inherit, disable, force} с дефолтом inherit.
-- Требуется: `SocksDiagnostics` — результирующие проверки (config parsed, tcp connect, auth, outbound test) с кодом статуса/ошибки.
-- Используется: существующие провайдерские клиенты/фабрика HTTP транспорта.
-
-### Interfaces
-- Конфигурация окружения: `LLM_SOCKS_ENABLED`, `LLM_SOCKS_TYPE`, `LLM_SOCKS_HOST`, `LLM_SOCKS_PORT`, `LLM_SOCKS_USERNAME`, `LLM_SOCKS_PASSWORD`, `LLM_SOCKS_STRICT`, `LLM_SOCKS_CONNECT_TIMEOUT`, `LLM_SOCKS_READ_TIMEOUT`.
-- Provider overrides (config/YAML): `providers.<name>.socks` = inherit|disable|force.
-- Internal API: `http_client_factory.for_provider(provider)` возвращает клиент с учётом политики и глобальных настроек; ошибки транспорта маппятся в SOCKS‑специфичные коды.
-- CLI: `llm-proxy status` (секция Socks Proxy), `llm-proxy doctor` (блок `[SOCKS PROXY]` с чек‑листом).
-- Observability: метрики `llm_socks_requests_total{provider}`, `llm_socks_errors_total{reason=connect|auth|timeout}`, `llm_requests_transport{transport=socks|direct}`.
-
-### Integration Notes
-- Transport‑слой не должен менять payload или политику приоритетов; он предоставляется провайдерам как готовый клиент.
-- При `LLM_SOCKS_ENABLED=false` поведение идентично текущему direct‑транспорту; `inherit` в провайдерах выбирает direct.
-- Strict‑режим влияет на fallback: если SOCKS недоступен и strict=true либо провайдер force — запрос завершается ошибкой без direct‑ретрая.
-- Фолбек на direct сопровождается WARN‑логом с провайдером; strict/force выдаёт ERROR и прерывает запрос.
-- Ошибки SOCKS отделяются от ошибок апстрима для корректной диагностики и метрик.
-
-### Feature Interfaces
-- Потребляет гарантии от: глобальных Settings (env), фабрики HTTP‑клиентов, роутеров, которые не вмешиваются в транспорт.
-- Поставляет гарантии: единообразное применение SOCKS по политике провайдера, фолбек/strict семантика, диагностируемые ошибки транспорта, метрики и CLI‑диагностика.
+## Feature Interfaces
+- **Environment**:
+  - `LLM_SOCKS_ENABLED` (bool, default=false)
+  - `LLM_SOCKS_HOST` / `LLM_SOCKS_PORT`
+  - `LLM_SOCKS_USERNAME` / `LLM_SOCKS_PASSWORD` (пароль никогда не выводится)
+  - `LLM_SOCKS_STRICT` (bool) — fail‑fast при ошибках транспорта
+  - `LLM_SOCKS_NO_PROXY` — список хостов/доменов/подсетей для обхода (пример: `localhost,127.0.0.1,.corp.local,10.0.0.0/8`)
+  - `LLM_SOCKS_REMOTE_DNS` (bool, default=true) — резолв через SOCKS vs локально
+  - `LLM_SOCKS_CONNECT_TIMEOUT`, `LLM_SOCKS_READ_TIMEOUT`, `LLM_SOCKS_STREAM_READ_TIMEOUT`
+  - `LLM_SOCKS_TEST_URL` — endpoint для outbound проверки (default: малый публичный HTTPS ресурс, без auth)
+- **Provider config**: `providers.<name>.socks` ∈ {inherit (default), disable, force}; force всегда требует SOCKS, даже при глобальном disabled.
+- **Internal API**: `http_client_factory.for_provider(provider, mode)` возвращает транспорт и причину ошибки; различает unavailable/blocked/no-egress/auth/timeout.
+- **CLI**: `llm-proxy status` выводит кэшированный результат и effective policy; `llm-proxy doctor` выполняет активную проверку connect/auth/egress (HEAD/GET) с краткими таймаутами, с маскировкой секрета.
+- **Metrics**: счётчики использования, ошибок, фолбеков; лейблы provider, reason, transport.
 
 ## Rules and Invariants
-- Глобально SOCKS отключён по умолчанию; `inherit` провайдера следует глобальному enable/disable.
-- `disable` всегда выбирает direct; `force` требует SOCKS даже если `enabled=false`.
-- Strict=true приводит к немедленному отказу при ошибках соединения/аутентификации/таймаута; strict=false допускает fallback на direct с WARN.
-- Тип поддерживается `socks5`; другие типы не должны silently деградировать (ошибка конфигурации).
-- Таймауты connect/read применяются к SOCKS‑транспорту; превышение генерирует `SOCKS_TIMEOUT`.
-- Логи INFO на старте фиксируют включённость/endpoint/strict; DEBUG логирует transport=... и target апстрима per request.
-- Диагностика doctor/status не должна менять состояние; outbound тест использует фиксированный HTTPS endpoint (напр. `https://api.openai.com`).
+- По умолчанию SOCKS отключён; наследование (`inherit`) следует глобальному флагу. `force` всегда требует SOCKS, даже при `enabled=false`.
+- При `strict=true` или `force` фолбек на direct запрещён; ошибка классифицируется и отдаётся как транспортная. При `strict=false` допускается одноразовый фолбек с WARN и инкрементом `llm_socks_fallback_total`.
+- NO_PROXY применяется до попытки соединения: если цель матчится, используется direct без попытки SOCKS; doctor/status фиксируют это в effective policy (blocked_by_no_proxy).
+- Remote DNS поведение фиксируется флагом: `true` — резолв через SOCKS, `false` — локальный резолв; doctor должен явно проверять и выводить используемый режим.
+- TLS/mTLS цепочка не модифицируется транспортом; ошибки TLS отражаются отдельно от SOCKS недоступности.
+- Секреты не логируются: пароль никогда не выводится; username опционально маскируется или отображается как `auth: enabled`.
+- `SOCKS unavailable` определяется как отказ TCP connect, таймаут соединения/чтения, сбой аутентификации; кейс «handshake успешен, egress заблокирован» фиксируется отдельным статусом reachable_no_egress.
+- Тестовый outbound запрос использует `LLM_SOCKS_TEST_URL`, HEAD/GET малый ресурс с коротким таймаутом и без auth. Таймаут для streaming запросов не должен обрывать длительное чтение (используется STREAM_READ_TIMEOUT либо отсутствие таймаута для idle‑периодов SSE).
+- Status кэширует последний результат диагностики с timestamp, doctor всегда выполняет активные проверки и обновляет кэш; частота doctor не должна приводить к DoS прокси.
 
 ## ADRs
-- SOCKS трактуется как capability транспорта, а не логика провайдеров; провайдеры получают уже сконфигурированный клиент.
-- Фолбек на direct допускается только при `strict=false` и политиках inherit/disable; force/strict комбинируются для fail‑fast.
-- Диагностические команды CLI расширяются секцией SOCKS вместо отдельных API‑эндпоинтов.
+- SOCKS политика реализована как часть транспортной фабрики, а не в провайдерах; провайдеры остаются транспарантными к выбору канала.
+- Force политика имеет приоритет над глобальным выключением, чтобы обеспечить явный отказ вместо тихого обхода.
+- Remote DNS включён по умолчанию для предотвращения утечек приватных доменов.
+- Диагностика разделяет состояния unavailable vs reachable_no_egress, чтобы корректно выбирать фолбек и алерты.
+- Status использует кэш, doctor — активный прогон; это снижает нагрузку на SOCKS и улучшает UX.
 
 ## Non-Goals / Out of Scope
-- HTTP‑proxy или комбинированный режим (будущее расширение).
-- Пер‑запросные overrides SOCKS; политика задаётся глобально или на уровне провайдера.
-- Специфическая логика TOR; поддержка ограничена общим SOCKS5.
-- Многопроцессная синхронизация настроек; остаётся однопроцессный контур.
+- Поддержка HTTP/HTTPS прокси, TOR или смешанных маршрутов.
+- Пер‑запросные overrides SOCKS и runtime переключение для отдельного вызова.
+- Управление TLS/mTLS материалами (сертификаты, ключи) или их хранение — остаётся обязанностью провайдеров/настроек вне SOCKS.
+- Автоматический бэкофф/ретраи транспортного слоя вне одного фолбека в нестрогом режиме.
+- Изменение логики приоритезации, очереди или control plane конкурентности.
 
 ## Open Questions
-- Нужен ли ретрай или backoff при временных ошибках SOCKS в strict=false, или достаточно однократного фолбека?
-- Как выбирать outbound тест для doctor в приватных инсталляциях (конфигурируемый URL vs. дефолт `api.openai.com`)?
-- Требуется ли экспортировать статус SOCKS в `/settings` или другом API для UI/observability?
+- Нужен ли тонкий контроль для streaming таймаутов (например, отсутствие таймаута на период без данных) или достаточно отдельного STREAM_READ_TIMEOUT?
+- Требуется ли UI/API экспонирование кэшированного статуса SOCKS вне CLI (например, в `/settings`)?
+- Следует ли логировать маскированный username или полностью скрывать его для анонимности?
