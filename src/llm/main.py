@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, status
+from fastapi import FastAPI
 
 import llm.deps as llm_deps
 from llm.config.settings import get_settings
