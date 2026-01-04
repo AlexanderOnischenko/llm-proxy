@@ -1,0 +1,298 @@
+entities:
+  - name: LLMRequest
+    description: Запрос к прокси на выполнение chat completion или invoke с приоритетным приёмом и трекингом выполнения
+    fields:
+      - name: id
+        type: UUID
+        description: Уникальный request_id, присваиваемый при приёме запроса
+      - name: endpoint
+        type: string
+        description: Использованный маршрут обращения (chat_completions, chat_invoke, llm)
+      - name: priority
+        type: string
+        description: Именованный приоритет запроса после нормализации и применения значений по умолчанию
+      - name: model
+        type: string
+        description: Идентификатор модели, указанный клиентом или применённый по умолчанию
+      - name: messages
+        type: array
+        description: Сообщения диалога в формате ChatCompletionRequest
+      - name: temperature
+        type: int
+        description: Параметр выборки ответа, нормализованный из входа
+      - name: top_p
+        type: int
+        description: Параметр вероятностной выборки, нормализованный из входа
+      - name: max_tokens
+        type: int
+        description: Ограничение токенов отклика, если задано клиентом
+      - name: stop
+        type: array
+        description: Список стоп-токенов или последовательностей, если переданы клиентом
+      - name: stream
+        type: bool
+        description: Флаг стриминга; должен быть ложным для допустимых запросов
+      - name: status
+        type: string
+        description: Состояние запроса в процессе прохождения очереди и выполнения (accepted, queued, running, completed, failed, rejected)
+      - name: received_at
+        type: datetime
+        description: Время получения запроса сервисом
+      - name: enqueued_at
+        type: datetime
+        description: Время помещения запроса в очередь после проверки лимитов
+      - name: started_at
+        type: datetime
+        description: Время начала выполнения запроса провайдером
+      - name: completed_at
+        type: datetime
+        description: Время завершения выполнения или отказа
+      - name: queue_latency_ms
+        type: int
+        description: Фактическая задержка ожидания в очереди от приёма до старта
+      - name: provider_latency_ms
+        type: int
+        description: Латентность вызова провайдера для запроса
+      - name: cache_hit
+        type: bool
+        description: Признак использования общего кэша при выполнении запроса
+      - name: error_code
+        type: string
+        description: Код ошибки при отклонении или сбое провайдера, если применимо
+    relations:
+      - related_to: PriorityClass
+        type: many-to-one
+        direction: from_self
+        description: Запрос ссылается на класс приоритета, определяющий лимиты inflight и допустимость
+      - related_to: QueuePolicy
+        type: many-to-one
+        direction: from_self
+        description: Запрос следует политике очереди, задающей max_queue и приоритет по умолчанию
+
+  - name: PriorityClass
+    description: Конфигурация конкретного приоритета с лимитами inflight и доступностью
+    fields:
+      - name: id
+        type: UUID
+        description: Уникальный идентификатор класса приоритета
+      - name: code
+        type: string
+        description: Имя приоритета, используемое клиентами и конфигурацией
+      - name: inflight_capacity
+        type: int
+        description: Максимальное число одновременных запросов для приоритета
+      - name: queue_capacity
+        type: int
+        description: Допустимая ёмкость очереди для данного приоритета (0 запрещает постановку)
+      - name: enabled
+        type: bool
+        description: Признак доступности приоритета для приёма запросов
+    relations:
+      - related_to: QueuePolicy
+        type: many-to-one
+        direction: from_self
+        description: Приоритет определяется в рамках конкретной политики очереди
+
+  - name: QueuePolicy
+    description: Политика конфигурации приёмки и очереди для LLM-запросов
+    fields:
+      - name: id
+        type: UUID
+        description: Уникальный идентификатор политики очереди
+      - name: default_priority
+        type: string
+        description: Приоритет, применяемый если клиент не указал валидный приоритет
+      - name: max_queue
+        type: int
+        description: Общая максимальная глубина очереди по всем приоритетам (-1 для безлимитной)
+      - name: cache_settings
+        type: object
+        description: Параметры использования общего кэша для вызовов провайдера
+      - name: provider_defaults
+        type: object
+        description: Значения модели и параметров генерации, применяемые при отсутствии входных значений
+    relations:
+      - related_to: PriorityClass
+        type: one-to-many
+        direction: from_self
+        description: Политика содержит набор приоритетов с лимитами inflight и очереди
+
+  - name: RequestAdmission
+    description: Решение о приёме или отказе в постановке запроса с указанием причины
+    fields:
+      - name: id
+        type: UUID
+        description: Идентификатор решения о приёме
+      - name: decision
+        type: string
+        description: Статус решения (accepted, rejected_overflow, rejected_invalid_priority, rejected_streaming)
+      - name: reason
+        type: string
+        description: Детализация причины отказа или подтверждение приёма
+      - name: evaluated_at
+        type: datetime
+        description: Время вычисления решения по запросу
+    relations:
+      - related_to: LLMRequest
+        type: one-to-one
+        direction: from_self
+        description: Решение относится к конкретному запросу и фиксирует исход приёмки
+
+  - name: ProviderExecution
+    description: Фиксация вызова внешнего провайдера LLM для принятого запроса
+    fields:
+      - name: id
+        type: UUID
+        description: Уникальный идентификатор попытки выполнения
+      - name: provider_name
+        type: string
+        description: Идентификатор используемого провайдера
+      - name: started_at
+        type: datetime
+        description: Время начала вызова провайдера
+      - name: completed_at
+        type: datetime
+        description: Время завершения вызова провайдера
+      - name: latency_ms
+        type: int
+        description: Латентность провайдера для данной попытки
+      - name: cache_used
+        type: bool
+        description: Признак, что ответ получен из кэша, а не из живого вызова
+      - name: error_code
+        type: string
+        description: Код ошибки провайдера при неуспешной попытке
+    relations:
+      - related_to: LLMRequest
+        type: many-to-one
+        direction: from_self
+        description: Выполнение связано с запросом, которому принадлежит результат
+
+  - name: QueueMetricsSnapshot
+    description: Снимок метрик очереди и inflight для наблюдаемости
+    fields:
+      - name: id
+        type: UUID
+        description: Уникальный идентификатор снимка метрик
+      - name: captured_at
+        type: datetime
+        description: Время снятия метрик
+      - name: queue_depth_total
+        type: int
+        description: Текущая общая глубина очереди
+      - name: inflight_total
+        type: int
+        description: Общее число выполняющихся запросов
+      - name: per_priority_stats
+        type: object
+        description: Пер-приоритетные показатели очереди и inflight
+      - name: latency_histogram
+        type: object
+        description: Агрегированные наблюдения по задержкам очереди и провайдера
+    relations:
+      - related_to: QueuePolicy
+        type: many-to-one
+        direction: from_self
+        description: Метрики собираются для конкретной политики и её приоритетов
+
+  - name: ObservabilityHeader
+    description: Доменный объект, описывающий метаданные, включаемые в ответ клиенту
+    fields:
+      - name: request_id
+        type: UUID
+        description: Идентификатор запроса, возвращаемый клиенту
+      - name: queue_latency_ms
+        type: int
+        description: Время ожидания в очереди, включаемое в заголовки x-llm-proxy-*
+      - name: provider_latency_ms
+        type: int
+        description: Время выполнения у провайдера, включаемое в заголовки
+      - name: priority
+        type: string
+        description: Применённый приоритет запроса
+      - name: endpoint
+        type: string
+        description: Эндпоинт, через который пришёл запрос, для трассировки
+    relations:
+      - related_to: LLMRequest
+        type: many-to-one
+        direction: from_self
+        description: Метаданные формируются из состояния обработанного запроса
+
+dtos:
+  - name: ChatCompletionRequestDTO
+    description: Входной DTO OpenAI-совместимого запроса для чата
+    related_entity: LLMRequest
+    fields:
+      - name: messages
+        type: array
+        description: Сообщения диалога, переданные клиентом
+      - name: model
+        type: string
+        description: Модель, указанная клиентом
+      - name: temperature
+        type: int
+        description: Параметр генерации из входа
+      - name: top_p
+        type: int
+        description: Параметр выборки из входа
+      - name: max_tokens
+        type: int
+        description: Желаемое ограничение токенов
+      - name: stop
+        type: array
+        description: Стоп-списки, заданные клиентом
+      - name: stream
+        type: bool
+        description: Флаг стриминга, подлежащий проверке
+      - name: priority
+        type: string
+        description: Приоритет, переданный в заголовке или теле клиента
+      - name: endpoint
+        type: string
+        description: Целевой маршрут вызова, выбранный клиентом
+
+  - name: InvokeResponseWithMetricsDTO
+    description: Ответ для invoke-эндпоинта с включёнными метриками очереди и провайдера
+    related_entity: LLMRequest
+    fields:
+      - name: request_id
+        type: string
+        description: Идентификатор выполненного запроса
+      - name: output
+        type: object
+        description: Результат выполнения провайдера
+      - name: queue_latency_ms
+        type: int
+        description: Значение задержки очереди, возвращаемое в теле
+      - name: provider_latency_ms
+        type: int
+        description: Значение латентности провайдера, возвращаемое в теле
+      - name: priority
+        type: string
+        description: Применённый приоритет запроса
+
+  - name: MetricsExpositionDTO
+    description: DTO вывода /metrics в формате Prometheus
+    related_entity: QueueMetricsSnapshot
+    fields:
+      - name: metrics_payload
+        type: string
+        description: Текстовое представление метрик для экспозиции
+      - name: captured_at
+        type: datetime
+        description: Время формирования текущего вывода
+
+  - name: LangChainLLMRequestDTO
+    description: DTO внутреннего вызова /llm, адаптируемого к ChatCompletionRequest
+    related_entity: LLMRequest
+    fields:
+      - name: payload
+        type: object
+        description: LangChain-совместимый ввод, требующий нормализации
+      - name: priority
+        type: string
+        description: Указанный или дефолтный приоритет для внутреннего запроса
+      - name: endpoint
+        type: string
+        description: Маршрут /llm для распознавания контекста вызова
