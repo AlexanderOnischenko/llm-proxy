@@ -28,6 +28,7 @@ Control Plane (поправки политики конкурентности) �
 | Request Identity       | Уникальный идентификатор запроса, связывающий обработку, метрики и ответ.                                        |
 | Execution Outcome      | Результат вызова провайдера (успех/ошибка) с сопутствующими задержками.                                          |
 | Observability Snapshot | Читаемое состояние очереди и метрики, не изменяющее выполнение.                                                  |
+| Execution Slot         | Абстрактная единица параллелизма по приоритету, которую Execution занимает перед запуском handler и освобождает после фиксации исхода. |
 
 ## Feature Map by Phase
 
@@ -38,6 +39,7 @@ Control Plane (поправки политики конкурентности) �
 | LLM Proxy Core Priority Admission and Execution Tracking | Admission/Scheduling                 | Admission Decision, Request Identity, Execution Outcome | Canonical Chat Request, Priority Claim, Concurrency Budget |
 | Dynamic Concurrency Control                              | Admission/Scheduling (control plane) | Updated Concurrency Budget                              | Operator/admin intent, Observability Snapshot              |
 | Queue Observability                                      | Observability                        | Observability Snapshot, Metrics with Request Identity   | Queue events, Execution Outcome                            |
+| Priority Execution Engine                                | Execution                            | Execution Outcome, Observability Snapshot               | Admission Decision, Priority Claim, Concurrency Budget, Execution Slot |
 
 ## Core Components
 
@@ -51,9 +53,10 @@ Control Plane (поправки политики конкурентности) �
 | Cache/Dedup Layer        | Повторное использование результатов и дедупликация одновременных идентичных запросов. |
 | Observability Exporter   | Экспорт метрик и снимков состояния для мониторинга.                                   |
 | Control Plane Interface  | Применение изменений Concurrency Budget без рестарта.                                 |
+| Priority Execution Loop  | Детерминированный цикл выборки очереди по приоритету, захвата/освобождения Execution Slot и фиксации исходов. |
 
 
-## Core Entties
+## Core Entities
 
 | Entity                   | Description                                                                    |
 | ------------------------ | ------------------------------------------------------------------------------ |
@@ -63,6 +66,7 @@ Control Plane (поправки политики конкурентности) �
 | Request ID               | Уникальный идентификатор, сквозной для обработки и наблюдаемости.              |
 | Queue State Snapshot     | Текущее количество ожидающих и выполняющихся запросов по приоритетам.          |
 | Provider Response        | Результат вызова апстрима, включая метаданные задержек и исход.                |
+| Execution Slot Ledger    | Текущее распределение занятых и свободных Execution Slot по приоритетам.       |
 
 
 ## System Data Flow
@@ -70,7 +74,7 @@ Control Plane (поправки политики конкурентности) �
 1. **Ingress**: Приём HTTP запроса, извлечение сырого тела и метаданных.
 2. **Normalization/Policy**: Валидация и канонизация параметров (модель, сэмплинг, запрет stream), формирование Canonical Chat Request.
 3. **Admission/Scheduling**: Нормализация Priority Claim, сопоставление с Concurrency Budget, принятие или отказ; назначение Request ID.
-4. **Execution**: Вызов провайдера с учётом кэша/дедупликации; фиксация Execution Outcome.
+4. **Execution**: Детерминированный цикл выборки очереди по строгому приоритету и FIFO в рамках приоритета, захват Execution Slot, запуск handler с кэшем/дедупликацией в фиксированной точке, фиксация Execution Outcome и освобождение слота.
 5. **Egress**: Возврат ответа с Request ID и метаданными задержек.
 6. **Observability**: Экспорт метрик и Queue State Snapshot; доступно без изменения выполнения.
 
@@ -86,6 +90,10 @@ Control Plane (поправки политики конкурентности) �
 - Observability пути (метрики, snapshots) не изменяют состояние исполнения или бюджетов.
 - Нормализация запроса завершается до попытки планирования; невалидные или запрещённые параметры не поступают в Admission.
 - Переполнение очереди или отсутствие слотов приводит к отказу без нарушения уже выполняющихся запросов.
+- Execution удерживает Execution Slot ровно один раз на задачу и освобождает его после фиксации исхода независимо от результата или отмены.
+- При `max_queue == 0` состояние queued недопустимо; при достижении глобального лимита очередь не растёт, а новые запросы получают overflow outcome.
+- Диспетчеризация в Execution следует строгому порядку: первый приоритет с доступным слотом и queued>0, затем FIFO внутри приоритета; cache/dedup не изменяют этот порядок.
+- События enqueue/dequeue/outcome/overflow отражаются в Observability Snapshot и метриках согласованно с фактическими значениями queued и in-flight.
 
 
 ## Notes
