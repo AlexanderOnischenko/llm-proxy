@@ -5,7 +5,6 @@ import os
 from fastapi import APIRouter, Response
 from prometheus_client import CONTENT_TYPE_LATEST, REGISTRY, CollectorRegistry, generate_latest
 
-
 router = APIRouter()
 
 

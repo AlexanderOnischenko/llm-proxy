@@ -2,9 +2,8 @@
   "include": ["."],
   "exclude": [".venv", ".venvs", "dist", "build"],
   "pythonVersion": "3.12",
-  "venvPath": "../.venvs/",
-  "venv": "llm",
+  "venvPath": ".venv",
   "executionEnvironments": [
-    { "root": ".", "extraPaths": ["./src", "../shared_pkg/src","../src"] }
+    { "root": ".", "extraPaths": ["./src"] }
   ]
 }

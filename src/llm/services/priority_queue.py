@@ -6,10 +6,9 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Deque, Dict
 
-from llm.models.chat import ChatCompletionRequest
-
 from prometheus_client import Counter, Gauge, Histogram
 
+from llm.models.chat import ChatCompletionRequest
 
 HISTOGRAM_BUCKETS_SECONDS = [
     0.001,

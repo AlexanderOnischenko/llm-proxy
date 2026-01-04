@@ -13,8 +13,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, Optional
 
-from shared_pkg.utils.logging_config import get_logger
-
+from llm.logging_config import get_logger
 
 logger = get_logger(__name__)
 

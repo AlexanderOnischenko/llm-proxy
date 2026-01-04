@@ -1,12 +1,10 @@
 # llm/config/settings.py
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Mapping, cast
 
-from pydantic import AnyHttpUrl, Field
+from pydantic import AnyHttpUrl, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
-from functools import lru_cache
-
 
 _MODEL_CONFIG = SettingsConfigDict(
     populate_by_name=True,
@@ -25,14 +23,15 @@ class Settings(BaseSettings):
     #  Настройки upstream LLM-провайдера
     llm_api_base:      AnyHttpUrl    = Field(cast(AnyHttpUrl, "https://api.llm7.io/v1"), validation_alias="LLM_API_BASE") # pyright: ignore[reportAssignmentType]
     llm_api_key:       str           = Field("unused",            validation_alias="LLM_API_KEY")
-    llm_model_name:    str           = Field("deepseek-v3-0324",  validation_alias="LLM_MODEL_NAME")
+    llm_default_model_name: str      = Field("deepseek-v3-0324",  validation_alias="LLM_DEFAULT_MODEL_NAME")
+    llm_model_override: str | None   = Field(None,                validation_alias="LLM_MODEL_NAME")
     llm_temperature:   float         = Field(0.0,                 validation_alias="LLM_TEMPERATURE")
     llm_top_p:         float         = Field(1.0,                 validation_alias="LLM_TOP_P")
     llm_max_tokens:    int           = Field(50000,               validation_alias="LLM_MAX_TOKENS")
     llm_verbose:       bool          = Field(True,                validation_alias="LLM_VERBOSE")
     llm_timeout:       float         = Field(300.0, validation_alias="LLM_TIMEOUT")
 
-        #  Настройки очередей
+    #  Настройки очередей
     llm_max_concurrent:int           = Field(1,                   validation_alias="LLM_MAX_CONCURRENT")
     llm_priority_slots: dict[str, int] = Field(
         default_factory=lambda: {"p1": 2, "p2": 1, "p3": 1}, validation_alias="LLM_PRIORITY_SLOTS"
@@ -58,11 +57,11 @@ class Settings(BaseSettings):
     testing:           bool          = Field(False,              validation_alias="TESTING")
 
     # Для Bearer-аутентификации
-    # llm_auth_url: Optional[str] =                   Field(None, env="GIGACHAT_AUTH_URL")
+    # llm_auth_url: Optional[str] = Field(None, env="GIGACHAT_AUTH_URL")
     # llm_auth_client_id: Optional[str] = None
     # llm_auth_client_secret: Optional[str] = None
     # Или для Basic-аутентификации при получении токена
-    # llm_auth_basic: Optional[str]                    = Field(None, env="GIGACHAT_API_KEY")  # base64 от "client_id:client_secret"
+    # llm_auth_basic: Optional[str] = Field(None, env="GIGACHAT_API_KEY")  # base64 от "client_id:client_secret"
 
     @property
     def is_production(self) -> bool:
@@ -79,6 +78,14 @@ class Settings(BaseSettings):
     @property
     def llm_priority_total_slots(self) -> int:
         return sum(max(v, 0) for v in self.llm_priority_limits_map.values())
+
+    @field_validator("llm_model_override")
+    @classmethod
+    def _normalize_override(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
 
     @property
     def llm_priority_limits_map(self) -> dict[str, int]:

@@ -9,10 +9,9 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
 from llm.deps import get_chat_queue
+from llm.logging_config import get_logger
 from llm.models.chat import ChatCompletionRequest
 from llm.services.priority_queue import PriorityChatQueue, ProviderError, QueueOverflowError, QueueResult
-from shared_pkg.utils.logging_config import get_logger
-
 
 logger = get_logger(__name__)
 
