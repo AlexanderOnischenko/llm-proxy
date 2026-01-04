@@ -66,7 +66,7 @@ detect_compose_service_name() {
   # Portable awk (macOS awk compatible). Picks first service under services:.
   awk '
     $1=="services:" {in_services=1; next}
-    in_services && $0 ~ /^[[:space:]]{2}[A-Za-z0-9_.-]+:[[:space:]]*$/ {
+    in_services && $0 ~ /^[[:space:]][[:space:]][A-Za-z0-9_.-]+:[[:space:]]*$/ {
       line=$0
       sub(/^[[:space:]]+/, "", line)
       sub(/:[[:space:]]*$/, "", line)
@@ -269,16 +269,8 @@ list_profiles() {
     fi
   fi
 
-  local f
-  shopt -s nullglob
-  for f in "${PROFILES_DIR}/"*.env; do
-    # Ignore runtime env files: "<name>.llm.env"
-    if [[ "$f" == *.llm.env ]]; then
-      continue
-    fi
-    local name
-    name="$(basename "$f" .env)"
-
+  local name
+  while IFS= read -r name; do
     if [[ "$name" == "$active" ]]; then
       local color
       color=""
@@ -297,6 +289,17 @@ list_profiles() {
     else
       echo "  $name"
     fi
+  done < <(list_profile_names)
+}
+
+list_profile_names() {
+  shopt -s nullglob
+  local f
+  for f in "${PROFILES_DIR}/"*.env; do
+    if [[ "$f" == *.llm.env ]]; then
+      continue
+    fi
+    basename "$f" .env
   done
   shopt -u nullglob
 }
@@ -348,7 +351,17 @@ resolve_project_dir() {
     fi
   fi
 
-  # 3) relative to script location (works when running from repo checkout)
+  # 3) config fallback (set during install)
+  if [[ -f "${PROJECT_DIR_FILE:-}" ]]; then
+    local saved
+    saved="$(sed -n '1p' "$PROJECT_DIR_FILE" | tr -d '\r\n')"
+    if [[ -n "$saved" && -f "${saved}/compose.yaml" ]]; then
+      echo "$saved"
+      return
+    fi
+  fi
+
+  # 4) relative to script location (works when running from repo checkout)
   local here
   here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
   if [[ -f "${here}/compose.yaml" ]]; then
@@ -357,6 +370,203 @@ resolve_project_dir() {
   fi
 
   die "cannot locate compose.yaml. Run from repo root, or set LLM_PROXY_PROJECT_DIR=/path/to/repo"
+}
+
+compose_services_from_file() {
+  local compose_file="$1"
+  awk '
+    $1=="services:" {in_services=1; next}
+    in_services && $0 ~ /^[[:space:]][[:space:]][A-Za-z0-9_.-]+:[[:space:]]*$/ {
+      line=$0
+      sub(/^[[:space:]]+/, "", line)
+      sub(/:[[:space:]]*$/, "", line)
+      print line
+      next
+    }
+    in_services && $0 !~ /^[[:space:]]/ {exit}
+  ' "$compose_file"
+}
+
+completion_service_names() {
+  local project_dir compose_file
+  project_dir="$(resolve_project_dir_soft)" || return 0
+  compose_file="${project_dir}/compose.yaml"
+  [[ -f "$compose_file" ]] || return 0
+
+  compose_services_from_file "$compose_file"
+}
+
+completion_profiles() {
+  # Prints one profile per line for completion consumers.
+  list_profile_names
+}
+
+commands_list() {
+  cat <<'EOF'
+help
+list
+ls
+active
+init
+create
+use
+switch
+edit
+edit-compose
+up
+start
+run
+debug
+down
+stop
+status
+logs
+delete
+rm
+remove
+paths
+install
+uninstall
+reinstall
+completion
+EOF
+}
+
+completion_commands() {
+  # Prints one command per line for completion consumers.
+  commands_list
+}
+
+completion_script_bash() {
+  cat <<'EOF'
+_llm_proxy_completions() {
+  local cur prev
+  COMPREPLY=()
+  cur="${COMP_WORDS[COMP_CWORD]}"
+  prev="${COMP_WORDS[COMP_CWORD-1]}"
+  local cmd="${COMP_WORDS[1]:-}"
+
+  if [[ $COMP_CWORD -eq 1 ]]; then
+    local cmds
+    cmds="$("${COMP_WORDS[0]}" __complete commands 2>/dev/null | tr '\n' ' ')"
+    COMPREPLY=( $(compgen -W "$cmds" -- "$cur") )
+    return 0
+  fi
+
+  if [[ "$cmd" == "completion" ]]; then
+    COMPREPLY=( $(compgen -W "bash zsh fish" -- "$cur") )
+    return 0
+  fi
+
+  if [[ "$cmd" == "logs" ]]; then
+    local profiles services first
+    profiles="$("${COMP_WORDS[0]}" __complete profiles 2>/dev/null | tr '\n' ' ')"
+    services="$("${COMP_WORDS[0]}" __complete services 2>/dev/null | tr '\n' ' ')"
+    first="${COMP_WORDS[2]:-}"
+
+    if [[ $COMP_CWORD -eq 2 ]]; then
+      COMPREPLY=( $(compgen -W "$profiles $services" -- "$cur") )
+      return 0
+    fi
+
+    COMPREPLY=( $(compgen -W "$services" -- "$cur") )
+    return 0
+  fi
+
+  case "${prev}" in
+    use|switch|up|debug|down|status|delete|edit|edit-compose)
+      local profiles
+      profiles="$("${COMP_WORDS[0]}" __complete profiles 2>/dev/null | tr '\n' ' ')"
+      COMPREPLY=( $(compgen -W "$profiles" -- "$cur") )
+      return 0
+      ;;
+  esac
+
+  return 0
+}
+complete -F _llm_proxy_completions llm-proxy
+EOF
+}
+
+completion_script_zsh() {
+  cat <<'EOF'
+#compdef llm-proxy
+
+_llm_proxy() {
+  local -a commands
+  local cmd_bin="${words[1]:-llm-proxy}"
+  commands=(${(f)$(_call_program commands "$cmd_bin" __complete commands)})
+
+  local context state state_descr line
+  _arguments -C \
+    '1:command:->command' \
+    '2:target:->target' \
+    '*::args:->args' && return 0
+
+  case $state in
+    command)
+      _describe -t commands "llm-proxy commands" commands
+      ;;
+    target)
+      case $line[1] in
+        use|switch|up|debug|down|status|logs|delete|edit|edit-compose)
+          local -a profiles services
+          profiles=($(_call_program profiles "$words[1]" __complete profiles))
+          if [[ $line[1] == logs ]]; then
+            services=($(_call_program services "$words[1]" __complete services))
+            _alternative \
+              "profiles:profiles:($profiles)" \
+              "services:services:($services)"
+          else
+            _values 'profiles' $profiles
+          fi
+          ;;
+        completion)
+          _values 'shell' bash zsh fish
+          ;;
+      esac
+      ;;
+    args)
+      if [[ $line[1] == logs ]]; then
+        _values 'services' $(_call_program services "$words[1]" __complete services)
+      fi
+      ;;
+  esac
+}
+
+_llm_proxy "$@"
+EOF
+}
+
+completion_script_fish() {
+  cat <<'EOF'
+function __llm_proxy_complete_commands
+  llm-proxy __complete commands 2>/dev/null
+end
+
+function __llm_proxy_complete_profiles
+  llm-proxy __complete profiles 2>/dev/null
+end
+
+function __llm_proxy_complete_services
+  llm-proxy __complete services 2>/dev/null
+end
+
+complete -c llm-proxy -n "__fish_use_subcommand" -a "(__llm_proxy_complete_commands)" -d "commands"
+complete -c llm-proxy -n "__fish_seen_subcommand_from use switch up debug down status logs delete edit edit-compose" -a "(__llm_proxy_complete_profiles)"
+complete -c llm-proxy -n "__fish_seen_subcommand_from logs" -a "(__llm_proxy_complete_services)"
+complete -c llm-proxy -n "__fish_seen_subcommand_from completion" -a "bash zsh fish"
+EOF
+}
+
+print_completion() {
+  local shell="$1"
+  case "$shell" in
+    bash) completion_script_bash ; return 0 ;;
+    zsh) completion_script_zsh ; return 0 ;;
+    fish) completion_script_fish ; return 0 ;;
+    *) die "unknown shell for completion: $shell (supported: bash zsh fish)" ;;
+  esac
 }
 
 # ---------------------------
@@ -741,7 +951,8 @@ compose_status() {
 }
 
 compose_logs() {
-  local name="$1"
+  local name="$1"; shift || true
+  local services=("$@")
 
   if can_compose_operate "$name"; then
     local project_dir compose_env override
@@ -762,19 +973,31 @@ compose_logs() {
         "${compose_args[@]}" \
         --env-file "$compose_env" \
         -p "${PROG}-${name}" \
-        logs -f --tail=200
+        logs -f --tail=200 "${services[@]}"
       return $?
     fi
   fi
 
   docker_available || die "docker not found"
-  local project_name containers
+  local project_name
+  local -a containers=()
   project_name="${PROG}-${name}"
-  containers="$(docker ps -aq --filter "label=com.docker.compose.project=${project_name}" || true)"
-  if [[ -z "$containers" ]]; then
+
+  if [[ "${#services[@]}" -gt 0 ]]; then
+    local svc list
+    for svc in "${services[@]}"; do
+      list="$(docker ps -aq --filter "label=com.docker.compose.project=${project_name}" --filter "label=com.docker.compose.service=${svc}" || true)"
+      if [[ -n "$list" ]]; then
+        containers+=($list)
+      fi
+    done
+  else
+    mapfile -t containers < <(docker ps -aq --filter "label=com.docker.compose.project=${project_name}" || true)
+  fi
+
+  if [[ "${#containers[@]}" -eq 0 ]]; then
     die "no containers found for project ${project_name}; profile may be stopped or invalid"
   fi
-  mapfile -t containers <<<"$containers"
   if [[ "${#containers[@]}" -gt 1 ]]; then
     echo "Multiple containers found for project ${project_name}; following most recent: ${containers[0]}" >&2
     echo "Other containers:" >&2
@@ -824,6 +1047,7 @@ Usage:
 
 Optional:
   $PROG install|uninstall|reinstall
+  $PROG completion <shell>   # print shell completion (bash|zsh|fish)
 EOF
 }
 
@@ -922,6 +1146,16 @@ main() {
   shift || true
 
   case "$cmd" in
+    __complete)
+      local target="${1:-}"
+      case "$target" in
+        commands) completion_commands ;;
+        profiles) completion_profiles ;;
+        services) completion_service_names ;;
+        *) exit 0 ;;
+      esac
+      exit 0
+      ;;
     help|-h|--help) usage ;;
     list|ls) list_profiles ;;
     paths)
@@ -1074,12 +1308,27 @@ main() {
       ;;
     logs)
       local name="${1:-}"
+      shift || true
+      local services=("$@")
+
       if [[ -z "$name" ]]; then
         name="$(get_active_profile)"; [[ -n "$name" ]] || die "no active profile; use: $PROG logs <name>"
       else
-        name="$(sanitize_profile_name "$name")" || die "invalid profile name (use letters/digits/._-; must not end with .llm)"
+        local candidate; candidate="$(sanitize_profile_name "$name")" || die "invalid profile name (use letters/digits/._-; must not end with .llm)"
+        if profile_exists "$candidate"; then
+          name="$candidate"
+        else
+          local active; active="$(get_active_profile)"
+          if [[ -n "$active" ]]; then
+            services=("$candidate" "${services[@]}")
+            name="$active"
+          else
+            die "no active profile; use: $PROG logs <profile> [service...]"
+          fi
+        fi
       fi
-      compose_logs "$name"
+
+      compose_logs "$name" "${services[@]}"
       ;;
     delete|rm|remove)
       local name="${1:-}"; [[ -n "$name" ]] || die "usage: $PROG delete <name> [--yes]"
@@ -1124,6 +1373,10 @@ main() {
     install) cmd_install ;;
     uninstall) cmd_uninstall ;;
     reinstall) cmd_reinstall ;;
+    completion)
+      local shell="${1:-}"; [[ -n "$shell" ]] || die "usage: $PROG completion <bash|zsh|fish>"
+      print_completion "$shell"
+      ;;
     *)
       usage
       die "unknown command: $cmd"
