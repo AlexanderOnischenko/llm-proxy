@@ -1,187 +1,102 @@
-# LLM Proxy — System Context (для разработчиков)
+# System Context
 
-## Что это за сервис
+## Overview
 
-**LLM Proxy** — небольшой FastAPI‑сервис, который выступает *прокси‑слоем* между клиентами и upstream LLM‑провайдерами.
-Его цель — сделать вызовы LLM **предсказуемыми в проде**:
+LLM Proxy — промежуточный слой между клиентами и LLM‑провайдерами, обеспечивающий предсказуемость выполнения запросов за счёт нормализации политики, приоритезации и управляемой конкурентности в однопроцессном режиме.
 
-- ограничивать конкурентность (и тем самым защищать upstream/сеть/сервер),
-- добавлять кэширование ответов,
-- поддерживать приоритизацию запросов,
-- держать совместимость с OpenAI‑подобным API (`/v1/chat/completions`),
-- инкапсулировать различия провайдеров (OpenAI‑совместимые и GigaChat).
+## Key Scenarios
 
-> Документ описывает **текущую** архитектуру по коду репозитория (модули `main.py`, `deps.py`, `services/*` и т.д.).
+- Обработка чат‑запроса с нормализацией параметров, приоритезацией и ограничением конкурентности перед вызовом апстрима.
+- Повторное использование ответов через кэш и дедупликацию одновременных идентичных запросов.
+- Наблюдаемость за глубиной очереди, задержками и исходами через метрики и идентификаторы запросов.
+- Динамическое изменение лимитов конкурентности по приоритетам без рестарта по сигналу control plane.
 
----
+## System Phases & Lifecycle
 
-## Внешние интерфейсы
+Ingress → Normalization/Policy → Admission/Scheduling → Execution → Egress → Observability (read-only, пересекает фазы)
 
-### HTTP API
+Control Plane (поправки политики конкурентности) действует асинхронно, влияя на Admission/Scheduling.
 
-- **Health/metrics**
-  - `GET /health` (есть в смоук‑сценариях и деплое; реализация обычно в роутерах/приложении)
-  - `GET /metrics` (Prometheus, через `llm.metrics.prometheus.router`)
-- **Chat completions (OpenAI‑style)**
-  - `POST /v1/chat/completions` (через `llm.routers.chat`)
-- **LLM (внутренний/legacy)**
-  - дополнительные эндпоинты через `llm.routers.llm` (контракт зависит от роутера)
+## Canonical Concepts
 
-### Конфигурация
+| Concept                | Description                                                                                                      |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| Canonical Chat Request | Нормализованное представление пользовательского запроса на чат‑комплишн, свободное от двусмысленностей политики. |
+| Priority Claim         | Явное или выведенное значение приоритета, совместимое с допустимым набором системы.                              |
+| Admission Decision     | Результат выбора: принять запрос в обработку или отклонить из‑за переполнения/некорректности.                    |
+| Concurrency Budget     | Текущее распределение слотов исполнения по приоритетам, применяемое планировщиком.                               |
+| Request Identity       | Уникальный идентификатор запроса, связывающий обработку, метрики и ответ.                                        |
+| Execution Outcome      | Результат вызова провайдера (успех/ошибка) с сопутствующими задержками.                                          |
+| Observability Snapshot | Читаемое состояние очереди и метрики, не изменяющее выполнение.                                                  |
+| Execution Slot         | Абстрактная единица параллелизма по приоритету, которую Execution занимает перед запуском handler и освобождает после фиксации исхода. |
 
-Настройки загружаются через Pydantic Settings (`llm.config.settings.Settings` + `get_settings()`).
-Есть механизм **overrides** для тестов/интеграции (см. `configure_settings_overrides/update/reset`).
+## Feature Map by Phase
 
----
+| Feature                                                  | Primary Phase                        | Produces                                                | Consumes                                                   |
+| -------------------------------------------------------- | ------------------------------------ | ------------------------------------------------------- | ---------------------------------------------------------- |
+| Request Policy & Normalization                           | Normalization/Policy                 | Canonical Chat Request                                  | Raw client payload, Settings defaults/overrides            |
+| Client-Defined Priorities                                | Admission/Scheduling                 | Priority Claim                                          | Client priority hint, Concurrency Budget (valid set)       |
+| LLM Proxy Core Priority Admission and Execution Tracking | Admission/Scheduling                 | Admission Decision, Request Identity, Execution Outcome | Canonical Chat Request, Priority Claim, Concurrency Budget |
+| Dynamic Concurrency Control                              | Admission/Scheduling (control plane) | Updated Concurrency Budget                              | Operator/admin intent, Observability Snapshot              |
+| Queue Observability                                      | Observability                        | Observability Snapshot, Metrics with Request Identity   | Queue events, Execution Outcome                            |
+| Priority Execution Engine                                | Execution                            | Execution Outcome, Observability Snapshot               | Admission Decision, Priority Claim, Concurrency Budget, Execution Slot |
 
-## Основные сценарии
+## Core Components
 
-1) **Обычный запрос chat completion**
-- Клиент отправляет `POST /v1/chat/completions`.
-- Запрос проходит через зависимости (settings/cache/provider/queue).
-- Применяется ограничение конкурентности и (опционально) кэш.
-- Выполняется вызов провайдера (OpenAI‑совместимый или GigaChat).
-- Возвращается ответ.
-
-2) **Кэш‑хит**
-- Для запроса вычисляется ключ (`make_key(...)`).
-- Если запись валидна по TTL — ответ возвращается без вызова upstream.
-
-3) **Dedup “inflight”**
-- При одновременных одинаковых запросах (один и тот же ключ) — второй и последующие ждут `Future` первого,
-  затем получают тот же результат (без повторного вызова upstream).
-
-4) **Приоритизация**
-- Запросы ставятся в очередь с приоритетом.
-- Планировщик очереди выбирает следующий запрос с учётом лимитов по приоритетам.
-
----
-
-## Внутренняя модель рантайма
-
-### Процессы / воркеры
-
-Сервис предполагает работу **в одном процессе / одном воркере** для корректности ограничений конкурентности и очереди.
-В docker entrypoint присутствует “hard guard”, запрещающий `--workers > 1`.
-
-### Параллельность
-
-- Входящие HTTP‑запросы обрабатываются асинхронно (FastAPI/ASGI).
-- Конкурентность upstream вызовов регулируется **PriorityChatQueue**:
-  - отдельные лимиты по приоритетам,
-  - учёт inflight,
-  - метрики Prometheus (inflight/queue/latency/ошибки).
-
----
-
-## Ключевые компоненты и границы ответственности
+| Component                | Responsibility                                                                        |
+| ------------------------ | ------------------------------------------------------------------------------------- |
+| FastAPI Application      | Приём HTTP запросов, маршрутизация по публичным и административным эндпоинтам.        |
+| Settings Loader          | Централизованная конфигурация и overrides для окружений.                              |
+| Canonical Request Models | Нормализация и валидация чат‑payload перед планированием.                             |
+| Priority Planner         | Применение приоритета, лимитов и принятие решений о постановке/отказе.                |
+| Provider Abstraction     | Унифицированный вызов LLM‑апстрима по нормализованному запросу.                       |
+| Cache/Dedup Layer        | Повторное использование результатов и дедупликация одновременных идентичных запросов. |
+| Observability Exporter   | Экспорт метрик и снимков состояния для мониторинга.                                   |
+| Control Plane Interface  | Применение изменений Concurrency Budget без рестарта.                                 |
+| Priority Execution Loop  | Детерминированный цикл выборки очереди по приоритету, захвата/освобождения Execution Slot и фиксации исходов. |
 
 
-| ID | Component | Layer | Code | Responsibility | Public contracts |
-|---|---|---|---|---|---|
-| app | FastAPI app factory | Interface | `main.py` | Создание приложения, подключение роутеров, middleware логирования запросов | ASGI app |
-| settings | Settings & overrides | Infrastructure | `settings.py` (`llm.config.settings`) | Загрузка env/settings, вычисление derived полей, overrides для тестов | `get_settings()`, `configure_settings_overrides()` |
-| deps | Dependency graph (DI) | Application | `deps.py` (`llm.deps`) | Инициализация singleton‑зависимостей: cache/provider/queue/llm wrapper | `get_chat_queue()`, `reset_chat_dependencies()` |
-| cache | SQLite cache + inflight | Infrastructure | `cache.py` (`llm.services.cache`) | TTL кэш, pickle storage, inflight dedup для одинаковых ключей | `SQLiteCache.get/set/get_or_set()` |
-| key | Cache key builder | Infrastructure | `cache.py` | Стабильное построение ключей на основе namespace+payload | `make_key(...)` |
-| queue | Priority chat queue | Application | `priority_queue.py` (`llm.services.priority_queue`) | Очередь с приоритетами + лимиты inflight + метрики | `PriorityChatQueue.submit(...)` |
-| provider | Provider interface | Infrastructure | `chat_provider.py` | Протокол провайдера и фабрика выбора реализаций | `ChatProvider`, `make_chat_provider()` |
-| provider_openai | OpenAI provider | Infrastructure | `chat_provider.py` | Отправка `/chat/completions` через `openai.AsyncOpenAI` + опции HTTP/mTLS/verify | `OpenAIChatProvider.chat_completions(...)` |
-| provider_gigachat | GigaChat provider | Infrastructure | `chat_provider.py` | GigaChat‑специфичная реализация (обычно mTLS) | `GigaChatProvider.chat_completions(...)` |
-| wrapper | Cached & queued LC wrapper | Application | `wrapper.py` (`llm.services.wrapper`) | Обёртка вокруг LangChain модели: асинхронные вызовы через очередь + кэш; блок синхронных методов | `CachedQueuedChatOpenAI.ainvoke/apredict/...` |
-| client_factory | LLM client factory | Application | `client.py` (`llm.services.client`) | Создание LangChain ChatOpenAI + обёртка `CachedQueuedChatOpenAI` | `create_custom_llm(...)` |
-| chat_models | Chat request/response models | Domain | `chat.py` + *implied* `llm.models.chat` | Pydantic модели сообщений и запроса chat completion | `ChatCompletionRequest.to_openai_payload(...)` |
-| llm_models | Legacy LLM request model | Domain | `llm.py` | Pydantic модель “method+args+kwargs+sender” | `LLMRequest` |
-| routers_chat | Chat router | Interface | *implied* `llm.routers.chat` | HTTP endpoint `/v1/chat/completions` | `POST /v1/chat/completions` |
-| routers_llm | Legacy LLM router | Interface | *implied* `llm.routers.llm` | Доп. endpoints (legacy) | depends |
-| metrics | Prometheus metrics router | Interface | *implied* `llm.metrics.prometheus` | Экспорт `/metrics` | `GET /metrics` |
+## Core Entities
 
-### 1) Settings / Config
+| Entity                   | Description                                                                    |
+| ------------------------ | ------------------------------------------------------------------------------ |
+| Chat Request             | Пользовательский запрос на чат‑комплишн с сообщениями и параметрами генерации. |
+| Priority                 | Поддерживаемое системой относительное значение важности запроса.               |
+| Concurrency Budget State | Карта слотов исполнения по приоритетам с версией и источником изменения.       |
+| Request ID               | Уникальный идентификатор, сквозной для обработки и наблюдаемости.              |
+| Queue State Snapshot     | Текущее количество ожидающих и выполняющихся запросов по приоритетам.          |
+| Provider Response        | Результат вызова апстрима, включая метаданные задержек и исход.                |
+| Execution Slot Ledger    | Текущее распределение занятых и свободных Execution Slot по приоритетам.       |
 
-- Источник правды — `Settings` (Pydantic Settings).
-- Конфиг влияет на:
-  - upstream base url / key / модель по умолчанию,
-  - параметры генерации (temperature/top_p),
-  - кэш (enabled/ttl/path),
-  - лимиты очереди (по приоритетам).
 
-**Инварианты**
-- Кэш‑путь вычисляется через `llm_cache_path_resolved` (explicit path > join dir+file).
-- Overrides используются для тестов и должны сбрасываться.
+## System Data Flow
 
-### 2) Provider abstraction
+1. **Ingress**: Приём HTTP запроса, извлечение сырого тела и метаданных.
+2. **Normalization/Policy**: Валидация и канонизация параметров (модель, сэмплинг, запрет stream), формирование Canonical Chat Request.
+3. **Admission/Scheduling**: Нормализация Priority Claim, сопоставление с Concurrency Budget, принятие или отказ; назначение Request ID.
+4. **Execution**: Детерминированный цикл выборки очереди по строгому приоритету и FIFO в рамках приоритета, захват Execution Slot, запуск handler с кэшем/дедупликацией в фиксированной точке, фиксация Execution Outcome и освобождение слота.
+5. **Egress**: Возврат ответа с Request ID и метаданными задержек.
+6. **Observability**: Экспорт метрик и Queue State Snapshot; доступно без изменения выполнения.
 
-`ChatProvider` — протокол (интерфейс) “как отправить запрос в upstream и получить ответ”.
+7. **Control Plane (asynchronous)**: Обновление Concurrency Budget, влияющее на будущие решения Admission/Scheduling.
 
-`make_chat_provider()` выбирает реализацию:
-- `OpenAIChatProvider` — OpenAI‑совместимые endpoints (через `openai.AsyncOpenAI`)
-- `GigaChatProvider` — GigaChat (в реальном коде обычно требует mTLS; параметры берутся из settings)
 
-**Инварианты**
-- Провайдер должен принимать `ChatCompletionRequest` и возвращать совместимый ответ/структуру.
-- Ошибки upstream оборачиваются/логируются так, чтобы не ломать прокси целиком.
+## Global Rules & Invariants
 
-### 3) Cache
+- Система работает в однопроцессном режиме; многопроцессный запуск нарушает корректность лимитов и метрик.
+- Только приоритеты, присутствующие в текущем Concurrency Budget с положительной вместимостью, могут быть приняты.
+- Concurrency Budget может обновляться без рестарта; новое состояние применяется атомарно для последующих Admission решений.
+- Каждый принятый запрос получает уникальный Request ID, отражённый в ответах и метриках.
+- Observability пути (метрики, snapshots) не изменяют состояние исполнения или бюджетов.
+- Нормализация запроса завершается до попытки планирования; невалидные или запрещённые параметры не поступают в Admission.
+- Переполнение очереди или отсутствие слотов приводит к отказу без нарушения уже выполняющихся запросов.
+- Execution удерживает Execution Slot ровно один раз на задачу и освобождает его после фиксации исхода независимо от результата или отмены.
+- При `max_queue == 0` состояние queued недопустимо; при достижении глобального лимита очередь не растёт, а новые запросы получают overflow outcome.
+- Диспетчеризация в Execution следует строгому порядку: первый приоритет с доступным слотом и queued>0, затем FIFO внутри приоритета; cache/dedup не изменяют этот порядок.
+- События enqueue/dequeue/outcome/overflow отражаются в Observability Snapshot и метриках согласованно с фактическими значениями queued и in-flight.
 
-`SQLiteCache`:
-- хранит значения (pickle) в sqlite,
-- поддерживает TTL,
-- поддерживает inflight‑dedup для одинаковых ключей,
-- ведёт счётчики hits/misses (и должен логировать ошибки десериализации).
 
-### 4) Priority queue (ограничение конкурентности + приоритеты)
+## Notes
 
-`PriorityChatQueue`:
-- принимает задачу (callable) с приоритетом и endpoint,
-- решает: выполнить сразу или поставить в очередь,
-- поддерживает max_queue (0 = “no queue”: если лимит занят — вернуть ошибку/отказ),
-- даёт наблюдаемость через Prometheus (latency, inflight, queue size, outcomes).
-
-### 5) Wrapper вокруг LangChain LLM
-
-`CachedQueuedChatOpenAI` — “обёртка”, которая:
-- блокирует синхронные методы (чтобы не обходить контроль конкурентности/кэш),
-- предоставляет асинхронные методы, которые:
-  - вычисляют ключ кэша,
-  - используют очередь для вызова upstream,
-  - возвращают LangChain‑совместимые сообщения/результаты.
-
----
-
-## Потоки данных
-
-### Flow: POST /v1/chat/completions (упрощённо)
-
-1. FastAPI получает запрос.
-2. Роутер валидирует вход (Pydantic модель запроса).
-3. Из DI берутся `Settings`, `SQLiteCache`, `ChatProvider`, `PriorityChatQueue`.
-4. Строится payload (модель по умолчанию, temperature/top_p).
-5. (Опционально) проверка кэша по ключу.
-6. Если miss: enqueue в `PriorityChatQueue` callable, который вызывает `ChatProvider`.
-7. Результат кладётся в кэш.
-8. Возврат ответа клиенту.
-
----
-
-## Наблюдаемость
-
-- Prometheus метрики внутри очереди (inflight/latency/outcomes).
-- Логи:
-  - middleware логирует входящие запросы (в debug),
-  - компоненты кэша/провайдера/очереди должны логировать ошибки и ключевые события.
-
----
-
-## Типовые failure modes и как дебажить
-
-- **HTTP code 000** на нагрузочных тестах: часто означает сетевой/транспортный сбой на стороне клиента (`curl`/бенчмарк),
-  таймаут или разрыв соединения, а не HTTP‑ответ сервиса.
-- **Рост inflight без спадов**: зависшие задачи upstream или отсутствие release в finally.
-- **Постоянные cache misses**: ключ нестабилен (включены поля, которые меняются) или TTL слишком мал.
-- **Отключение кэша**: settings (enabled=false) или невалидный путь к sqlite.
-
----
-
-## Где читать дальше
-
-- Тесты: `test_cache_*`, `test_chat_provider.py`, `test_chat_priority_queue.py`, `test_wrapper_cache.py`.
+- Кэш и дедупликация рассматриваются как оптимизации Execution и не изменяют фазовую модель или канонические концепты.
+- Расширение приоритетов или изменение их вместимости требует согласованности между Control Plane, Admission и Observability.

@@ -1,0 +1,219 @@
+components:
+  - name: PriorityChatQueue
+    structural:
+      layer: TBD
+      type: new
+      scope: TBD
+      dependencies: []
+      needs_logical_view: true
+    semantic:
+      responsibility: "Управляет приоритетными слотами и глубиной очереди чат-запросов, хранит допустимые приоритеты и дефолт, отклоняет заявки с отключёнными приоритетами, измеряет задержки и обновляет метрики приемки/выполнения, атомарно применяет обновлённую карту слотов без пересоздания очереди, предоставляет snapshot() для read-only наблюдения."
+      public_interfaces:
+        - enqueue(request_id, priority, payload, endpoint)
+        - snapshot()
+        - update_limits(new_limits, default_priority)
+      interacts_with:
+        - llm.routers.chat
+        - llm.routers.llm
+        - llm.services.chat_provider.OpenAIChatProvider
+        - PriorityMapping
+        - ConcurrencyConfigManager
+        - admin.routers.concurrency
+        - admin.routers.queue
+        - llm.metrics.prometheus.router
+  - name: llm.routers.chat
+    structural:
+      layer: TBD
+      type: new
+      scope: TBD
+      dependencies: []
+      needs_logical_view: true
+    semantic:
+      responsibility: "Обрабатывает POST /v1/chat/completions и /v1/chat/invoke: валидирует тело ChatCompletionRequest, запрещает stream, подставляет модель/сэмплинг по политике Settings, извлекает приоритет из заголовка/тела, нормализует псевдонимы через PriorityMapping с учётом default_priority очереди, отклоняет неизвестные или отключённые приоритеты, ставит запросы в очередь с каноническим значением и возвращает request_id и метрики очереди в заголовках/ответе."
+      public_interfaces:
+        - POST /v1/chat/completions
+        - POST /v1/chat/invoke
+      interacts_with:
+        - PriorityChatQueue
+        - llm.services.chat_provider.OpenAIChatProvider
+        - llm.deps
+        - PriorityMapping
+        - Settings
+  - name: llm.routers.llm
+    structural:
+      layer: TBD
+      type: new
+      scope: TBD
+      dependencies: []
+      needs_logical_view: true
+    semantic:
+      responsibility: "Адаптирует LangChain-совместимые вызовы /llm к ChatCompletionRequest, запрещает stream, заполняет модель и сэмплинг по политике Settings при отсутствии во входе, наследует/извлекает приоритет из входа, нормализует его по правилам псевдонимов и дефолта очереди, отклоняет невалидные значения, ставит запросы в очередь с каноническим приоритетом и возвращает request_id и метрики очереди в ответ."
+      public_interfaces:
+        - POST /llm
+      interacts_with:
+        - PriorityChatQueue
+        - llm.services.chat_provider.OpenAIChatProvider
+        - llm.deps
+        - PriorityMapping
+        - Settings
+  - name: llm.services.chat_provider.OpenAIChatProvider
+    structural:
+      layer: TBD
+      type: new
+      scope: TBD
+      dependencies: []
+      needs_logical_view: true
+    semantic:
+      responsibility: "Вызывает upstream OpenAI-подобного провайдера с применением настроек по умолчанию и override (модель, temperature, top_p), обрабатывает max_tokens как передано, формирует канонический payload для провайдера и ответы с идентификатором запроса и метриками."
+      public_interfaces:
+        - invoke_chat(request)
+      interacts_with:
+        - PriorityChatQueue
+        - llm.routers.chat
+        - llm.routers.llm
+        - Settings
+  - name: llm.metrics.prometheus.router
+    structural:
+      layer: TBD
+      type: new
+      scope: TBD
+      dependencies: []
+      needs_logical_view: true
+    semantic:
+      responsibility: "Экспортирует Prometheus-совместимые метрики очереди и провайдера (глубина, inflight, latency, overflow, исходы), собираемые из PriorityChatQueue без изменения её состояния."
+      public_interfaces:
+        - GET /metrics
+      interacts_with:
+        - PriorityChatQueue
+        - llm.deps
+        - ConcurrencyConfigManager
+        - Settings
+  - name: admin.routers.queue
+    structural:
+      layer: TBD
+      type: new
+      scope: TBD
+      dependencies: []
+      needs_logical_view: true
+    semantic:
+      responsibility: "Читает снимок состояния очереди по приоритетам из PriorityChatQueue и возвращает его как read-only API для операторов."
+      public_interfaces:
+        - GET /admin/queue
+      interacts_with:
+        - PriorityChatQueue
+        - llm.deps
+        - Settings
+  - name: llm.deps
+    structural:
+      layer: TBD
+      type: new
+      scope: TBD
+      dependencies: []
+      needs_logical_view: true
+    semantic:
+      responsibility: "Инициализирует и предоставляет singleton-зависимости (кэш, провайдер, очередь, настройки) для FastAPI маршрутов."
+      public_interfaces:
+        - get_priority_queue()
+        - get_chat_provider()
+        - get_settings()
+        - get_concurrency_config_manager()
+      interacts_with:
+        - PriorityChatQueue
+        - llm.services.chat_provider.OpenAIChatProvider
+        - llm.routers.chat
+        - llm.routers.llm
+        - ConcurrencyConfigManager
+        - llm.metrics.prometheus.router
+        - admin.routers.queue
+        - llm.main
+        - Settings
+  - name: llm.main
+    structural:
+      layer: TBD
+      type: new
+      scope: TBD
+      dependencies: []
+      needs_logical_view: true
+    semantic:
+      responsibility: "Запускает FastAPI приложение, регистрирует маршруты и зависимости, выполняет проверки однопроцессного режима и экспонирует метрики."
+      public_interfaces:
+        - create_app()
+        - startup_checks()
+      interacts_with:
+        - llm.routers.chat
+        - llm.routers.llm
+        - llm.deps
+        - PriorityChatQueue
+        - llm.services.chat_provider.OpenAIChatProvider
+        - llm.metrics.prometheus.router
+        - admin.routers.queue
+  - name: PriorityMapping
+    structural:
+      layer: TBD
+      type: new
+      scope: TBD
+      dependencies: []
+      needs_logical_view: true
+    semantic:
+      responsibility: "Сопоставляет входной приоритет и псевдонимы highest/p0/lowest с допустимыми ключами очереди, применяет default_priority при отсутствии входа и детерминированно сигнализирует об ошибках при неизвестных или отключённых значениях."
+      public_interfaces:
+        - resolve(input_priority, queue_priorities, default_priority)
+      interacts_with:
+        - PriorityChatQueue
+        - llm.routers.chat
+        - llm.routers.llm
+  - name: ConcurrencyConfigManager
+    structural:
+      layer: TBD
+      type: new
+      scope: TBD
+      dependencies: []
+      needs_logical_view: true
+    semantic:
+      responsibility: "Хранит актуальную карту слотов по приоритетам, default_priority и max_queue, версионирует изменения, валидирует входные обновления и предоставляет снимок состояния control plane."
+      public_interfaces:
+        - get_state()
+        - apply_update(slots_by_priority, default_priority, updated_by)
+      interacts_with:
+        - PriorityChatQueue
+        - llm.deps
+        - admin.routers.concurrency
+        - Settings
+  - name: admin.routers.concurrency
+    structural:
+      layer: TBD
+      type: new
+      scope: TBD
+      dependencies: []
+      needs_logical_view: true
+    semantic:
+      responsibility: "Предоставляет административный HTTP API для чтения и изменения лимитов конкурентности: GET/PATCH /admin/concurrency, валидирует вход, возвращает версии и ошибки без прерывания текущих запросов."
+      public_interfaces:
+        - GET /admin/concurrency
+        - PATCH /admin/concurrency
+      interacts_with:
+        - ConcurrencyConfigManager
+        - PriorityChatQueue
+        - llm.deps
+        - Settings
+  - name: Settings
+    structural:
+      layer: TBD
+      type: new
+      scope: TBD
+      dependencies: []
+      needs_logical_view: true
+    semantic:
+      responsibility: "Хранит конфигурацию политики нормализации запросов: значения по умолчанию и override для модели и параметров сэмплинга, лимиты max_tokens и очереди, предоставляет их остальным компонентам."
+      public_interfaces:
+        - load()
+        - get_llm_defaults()
+        - get_priority_limits()
+      interacts_with:
+        - llm.deps
+        - llm.routers.chat
+        - llm.routers.llm
+        - llm.services.chat_provider.OpenAIChatProvider
+        - ConcurrencyConfigManager
+        - llm.metrics.prometheus.router
+        - admin.routers.queue

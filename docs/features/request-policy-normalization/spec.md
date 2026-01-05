@@ -1,87 +1,82 @@
-Request Policy & Normalization
+# Feature: Request Policy & Normalization
 
-Problem Statement
-Клиенты LLM используют разные SDK, модели и параметры, что приводит к:
+## Problem Statement
+Гарантировать, что входящие чат‑запросы приводятся к предсказуемой, валидной форме перед планированием: значения модели и сэмплинга заполняются по политикам прокси, недопустимые параметры отклоняются, а downstream получает канонический payload без амбигуити.
 
-превышению лимитов провайдеров,
+## Users / Actors
+- Клиентские приложения, вызывающие `/v1/chat/completions` и `/v1/chat/invoke`.
+- Внутренние интеграции через `/llm`, проксирующие LangChain‑совместимые вызовы.
+- Операторы/SRE, задающие значения по умолчанию и ограничения через конфигурацию окружения.
 
-нестабильному поведению,
+## Use Cases
+- Клиент отправляет частично заполненный запрос; система подставляет модель и сэмплинг по умолчанию, чтобы уменьшить ошибки апстрима.
+- Интеграция через `/llm` получает единообразный формат `ChatCompletionRequest`, чтобы далее работать с очередью и провайдером без ветвлений.
+- Оператор задаёт `LLM_MODEL_NAME` для жёсткой подмены модели на уровне прокси, сохраняя совместимость API с клиентами.
 
-ошибкам апстрима,
+## Feature Boundary & Responsibility
+Фича отвечает за нормализацию и политику параметров запросов (модель, temperature, top_p, max_tokens, stream) до постановки в очередь. Она не управляет приоритетами, конкурентностью, отменами или метриками исполнения.
 
-невозможности централизованно управлять политиками.
+## Execution Phase
+Normalization / Policy
 
-Цель
-Обеспечить, что каждый запрос, попадающий в систему исполнения:
+## Conceptual Inputs & Outputs
+### Inputs (conceptual)
+- Сырой HTTP payload чата (`ChatCompletionRequest`) с опциональными полями модели и сэмплинга.
+- Контекст конфигурации (`Settings`): `llm_default_model_name`, `llm_model_override`, `llm_temperature`, `llm_top_p`, `llm_max_tokens`.
+- Встроенные правила валидации Pydantic‑моделей.
 
-валиден,
+### Outputs (conceptual)
+- Канонизированный `ChatCompletionRequest` для очереди/провайдера, где:
+  - заполнена модель (override или default),
+  - применены значения по умолчанию для temperature/top_p при отсутствии в запросе,
+  - поле `stream` выключено или приводит к отказу.
+- Решение об отказе с описанием ошибки (400) при невалидных полях.
 
-соответствует политикам платформы,
+## Proposed Solution
 
-предсказуем для downstream-компонентов.
+### Affected Components
+- `llm.routers.chat` — оставить ответственность за валидацию тела и запрет `stream`; нормализовать модель/приоритет уже реализовано.
+- `llm.routers.llm` — продолжать преобразовывать LangChain‑сообщения в `ChatCompletionRequest`, используя те же правила по модели и запрету `stream`.
+- `llm.services.chat_provider.OpenAIChatProvider` — применять `llm_default_model_name`, `llm_model_override`, `llm_temperature`, `llm_top_p` при построении payload; макс. токены передаются как есть.
+- `llm.config.settings.Settings` — источник значений по умолчанию и override; дополнительно может потребоваться явный флаг строгого лимита max_tokens (см. Open Questions).
 
-Что ВХОДИТ в эту фичу
+### Data Models
+- Используется: `ChatCompletionRequest` — входной/канонический payload чата (messages, model, temperature, top_p, max_tokens, stop, stream).
+- Используется: `Settings` — конфигурация, определяющая значения по умолчанию и override модели и сэмплинга.
+- Используется: нормализованный payload провайдера (dict) — результат `to_provider_payload` с применёнными дефолтами и override.
 
-✅ Overrides:
+### Interfaces
+- HTTP: `POST /v1/chat/completions`, `POST /v1/chat/invoke`, `POST /llm`.
+- Внутренние функции: `ChatCompletionRequest.model_validate(...)` (валидация), `ChatCompletionRequest.to_provider_payload(...)` (подстановка дефолтов), запрет `stream` в роутерах.
+- Конфигурация: переменные `LLM_DEFAULT_MODEL_NAME`, `LLM_MODEL_NAME`, `LLM_TEMPERATURE`, `LLM_TOP_P`, `LLM_MAX_TOKENS`.
 
-model (hard override или default)
+### Integration Notes
+- Нормализация выполняется перед `PriorityChatQueue`: ошибки валидации не должны попадать в очередь.
+- Кэш/очередь предполагают детерминированный payload; подстановка дефолтов должна быть стабильной при одинаковом входе и конфигурации.
+- Приоритет/конкурентность и метрики очереди остаются в других фичах; нормализация только готовит вход.
 
-max_tokens (clamp / strict)
+### Feature Interfaces
+- Потребляет гарантии от: Settings (значения по умолчанию и override), Pydantic‑валидации моделей.
+- Поставляет гарантии: канонизированный запрос для фичи приоритезации и вызова провайдера; явные ошибки 400 при неверных полях или `stream=True`.
 
-temperature, top_p
+## Rules and Invariants
+- Если `model` не задан в запросе, используется `llm_default_model_name`; если задан `llm_model_override`, он заменяет модель вне зависимости от входа.
+- `stream=True` для чат‑маршрутов отклоняется (400).
+- Temperature/top_p заполняются дефолтами из Settings, если отсутствуют во входе; при передаче сохраняются как есть.
+- Валидация Pydantic отклоняет пустой список сообщений и пустые строки модели.
+- max_tokens сейчас передаётся как есть; кламп/строгий режим требует отдельного решения (см. Open Questions).
 
-provider-specific параметры
+## ADRs
+- Использование Pydantic‑моделей для нормализации входа.
+- Подстановка дефолтов и override модели выполняется в `OpenAIChatProvider` перед вызовом upstream.
+- Запрет многопроцессного режима не затрагивает данную фичу, но обеспечивает единое состояние конфигурации и кэша.
 
-✅ Substitutions:
+## Non-Goals / Out of Scope
+- Управление приоритетами, очередями и конкурентностью.
+- Наблюдаемость/метрики исполнения; максимум — логирование ошибок валидации.
+- Управление токенными лимитами провайдера (кроме прямой передачи max_tokens из входа).
+- Admin API для динамического изменения политик.
 
-модель по профилю
-
-параметры по environment / tenant / proxy instance
-
-per-model defaults
-
-✅ Validation:
-
-допустимые диапазоны
-
-строгий / мягкий режим (LLM_MAX_TOKENS_STRICT)
-
-fallback значения
-
-✅ Deterministic output:
-
-одинаковый вход → одинаковый “нормализованный” запрос
-
-Что НЕ ВХОДИТ
-
-❌ Очереди
-❌ Приоритеты
-❌ Concurrency
-❌ Admin API
-❌ Метрики исполнения
-
-(максимум — debug-лог “request normalized”)
-
-Где она стоит в пайплайне
-
-Это очень важно концептуально:
-
-HTTP request
-   ↓
-[ Feature: Request Policy & Normalization ]
-   ↓
-Canonical LLMRequest
-   ↓
-[ Feature: Priority-based Scheduling ]
-   ↓
-[ Feature: Concurrency Control ]
-   ↓
-Provider Adapter
-
-
-👉 Overrides всегда ДО очереди.
-
-## Правила и инварианты
-
-- Все запросы проходят проверку на лимит `max_tokens` до отправки к провайдеру в режиме strict.
-- В случае превышения `LLM_MAX_TOKENS_STRICT` — значение `max_tokens` урезается до лимита, при этом генерируется warning.
+## Open Questions
+- Нужен ли строгий кламп `max_tokens` относительно `llm_max_tokens` на этапе нормализации и какой режим (ошибка или урезание) предпочтителен?
+- Требуется ли валидация диапазонов temperature/top_p и какие границы следует применять (provider-specific vs. общие)?
