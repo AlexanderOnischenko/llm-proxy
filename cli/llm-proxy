@@ -55,6 +55,19 @@ resolve_dirs() {
   PROJECT_DIR_FILE="${CONFIG_DIR}/project_dir"
 }
 
+default_compose_service_soft() {
+  # Returns the primary service name (first under services:), or $LLM_PROXY_SERVICE if set.
+  local project_dir base_compose svc
+  project_dir="$(resolve_project_dir_soft 2>/dev/null || true)"
+  [[ -n "$project_dir" ]] || return 1
+  base_compose="${project_dir}/compose.yaml"
+  [[ -f "$base_compose" ]] || return 1
+
+  svc="$(detect_compose_service_name "$base_compose" 2>/dev/null || true)"
+  [[ -n "$svc" ]] || return 1
+  printf '%s\n' "$svc"
+}
+
 detect_compose_service_name() {
   local compose_file="$1"
 
@@ -952,7 +965,29 @@ compose_status() {
 
 compose_logs() {
   local name="$1"; shift || true
-  local services=("$@")
+
+  # Capture service args without creating an "empty array expansion" footgun under `set -u`.
+  local -a services=()
+  if [[ $# -gt 0 ]]; then
+    services=("$@")
+  fi
+
+  # Drop empty service names (defensive).
+  if [[ -n "${services[0]:-}" ]]; then
+    local -a filtered=()
+    local s
+    for s in "${services[@]}"; do
+      [[ -n "$s" ]] && filtered+=("$s")
+    done
+    services=("${filtered[@]}")
+  fi
+
+  # Default to the primary service when none is specified.
+  if [[ -z "${services[0]:-}" ]]; then
+    local default_svc=""
+    default_svc="$(default_compose_service_soft 2>/dev/null || true)"
+    [[ -n "$default_svc" ]] && services=("$default_svc")
+  fi
 
   if can_compose_operate "$name"; then
     local project_dir compose_env override
@@ -967,13 +1002,23 @@ compose_logs() {
         fi
       fi
 
-      docker compose \
-        --project-directory "$project_dir" \
-        -f "${project_dir}/compose.yaml" \
-        "${compose_args[@]}" \
-        --env-file "$compose_env" \
-        -p "${PROG}-${name}" \
-        logs -f --tail=200 "${services[@]}"
+      if [[ -n "${services[0]:-}" ]]; then
+        docker compose \
+          --project-directory "$project_dir" \
+          -f "${project_dir}/compose.yaml" \
+          "${compose_args[@]}" \
+          --env-file "$compose_env" \
+          -p "${PROG}-${name}" \
+          logs -f --tail=200 "${services[@]}"
+      else
+        docker compose \
+          --project-directory "$project_dir" \
+          -f "${project_dir}/compose.yaml" \
+          "${compose_args[@]}" \
+          --env-file "$compose_env" \
+          -p "${PROG}-${name}" \
+          logs -f --tail=200
+      fi
       return $?
     fi
   fi
@@ -983,16 +1028,27 @@ compose_logs() {
   local -a containers=()
   project_name="${PROG}-${name}"
 
-  if [[ "${#services[@]}" -gt 0 ]]; then
+  if [[ -n "${services[0]:-}" ]]; then
     local svc list
     for svc in "${services[@]}"; do
-      list="$(docker ps -aq --filter "label=com.docker.compose.project=${project_name}" --filter "label=com.docker.compose.service=${svc}" || true)"
+      list="$(docker ps -aq \
+        --filter "label=com.docker.compose.project=${project_name}" \
+        --filter "label=com.docker.compose.service=${svc}" || true)"
       if [[ -n "$list" ]]; then
         containers+=($list)
       fi
     done
   else
-    mapfile -t containers < <(docker ps -aq --filter "label=com.docker.compose.project=${project_name}" || true)
+    # Best-effort: prefer the default service container if we can detect it.
+    local default_svc=""
+    default_svc="$(default_compose_service_soft 2>/dev/null || true)"
+    if [[ -n "$default_svc" ]]; then
+      mapfile -t containers < <(docker ps -aq \
+        --filter "label=com.docker.compose.project=${project_name}" \
+        --filter "label=com.docker.compose.service=${default_svc}" || true)
+    else
+      mapfile -t containers < <(docker ps -aq --filter "label=com.docker.compose.project=${project_name}" || true)
+    fi
   fi
 
   if [[ "${#containers[@]}" -eq 0 ]]; then
@@ -1307,28 +1363,54 @@ main() {
       compose_status "$name"
       ;;
     logs)
-      local name="${1:-}"
+      local first="${1:-}"
       shift || true
-      local services=("$@")
-
-      if [[ -z "$name" ]]; then
-        name="$(get_active_profile)"; [[ -n "$name" ]] || die "no active profile; use: $PROG logs <name>"
+      # Remaining args are services (optional).
+      local -a services=()
+      if [[ $# -gt 0 ]]; then
+        services=("$@")
+      fi
+      local name=""
+      if [[ -z "$first" ]]; then
+        name="$(get_active_profile)"; [[ -n "$name" ]] || die "no active profile; use: $PROG use <name> (then: $PROG logs)"
       else
-        local candidate; candidate="$(sanitize_profile_name "$name")" || die "invalid profile name (use letters/digits/._-; must not end with .llm)"
-        if profile_exists "$candidate"; then
-          name="$candidate"
-        else
-          local active; active="$(get_active_profile)"
-          if [[ -n "$active" ]]; then
-            services=("$candidate" "${services[@]}")
-            name="$active"
+        # If `first` is an existing profile -> use it; otherwise treat it as a service name under active profile.
+        local candidate=""
+        if candidate="$(sanitize_profile_name "$first" 2>/dev/null)"; then
+          if profile_exists "$candidate"; then
+            name="$candidate"
           else
-            die "no active profile; use: $PROG logs <profile> [service...]"
+            name="$(get_active_profile)"; [[ -n "$name" ]] || die "no active profile; use: $PROG logs <profile> [service...]"
+            local -a new_services=("$first")
+            if [[ -n "${services[0]:-}" ]]; then
+              new_services+=("${services[@]}")
+            fi
+            services=("${new_services[@]}")
           fi
+        else
+          name="$(get_active_profile)"; [[ -n "$name" ]] || die "no active profile; use: $PROG logs <profile> [service...]"
+          local -a new_services=("$first")
+          if [[ -n "${services[0]:-}" ]]; then
+            new_services+=("${services[@]}")
+          fi
+          services=("${new_services[@]}")
         fi
       fi
-
-      compose_logs "$name" "${services[@]}"
+      # Drop empty service names (defensive).
+      if [[ -n "${services[0]:-}" ]]; then
+        local -a filtered=()
+        local s
+        for s in "${services[@]}"; do
+          [[ -n "$s" ]] && filtered+=("$s")
+        done
+        services=("${filtered[@]}")
+      fi
+      # Call without expanding an empty array.
+      if [[ -n "${services[0]:-}" ]]; then
+        compose_logs "$name" "${services[@]}"
+      else
+        compose_logs "$name"
+      fi
       ;;
     delete|rm|remove)
       local name="${1:-}"; [[ -n "$name" ]] || die "usage: $PROG delete <name> [--yes]"
