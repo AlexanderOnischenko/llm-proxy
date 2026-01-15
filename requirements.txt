@@ -46,9 +46,7 @@ httpx==0.28.1
 httpx-socks==0.10.0
     # via -r requirements.in
 python-socks==2.7.1
-    # via
-    #   -r requirements.in
-    #   httpx-socks
+    # via httpx-socks
 idna==3.11
     # via
     #   anyio
