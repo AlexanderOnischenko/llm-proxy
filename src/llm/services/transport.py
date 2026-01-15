@@ -4,7 +4,7 @@ import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Literal
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import httpx
 from httpx_socks import AsyncProxyTransport, SyncProxyTransport
@@ -39,14 +39,27 @@ class SocksProxyError(RuntimeError):
         self.code = code
 
 
+def _unwrap_exception(exc: Exception) -> Exception:
+    current = exc
+    while True:
+        candidate = getattr(current, "__cause__", None) or getattr(current, "__context__", None)
+        if candidate is None or candidate is current:
+            return current
+        if isinstance(candidate, Exception):
+            current = candidate
+            continue
+        return current
+
+
 def _classify_socks_error(exc: Exception) -> SocksErrorDetails | None:
-    if isinstance(exc, ProxyAuthenticationError):
+    target = _unwrap_exception(exc)
+    if isinstance(target, ProxyAuthenticationError):
         return SocksErrorDetails(code="SOCKS_AUTH_ERROR", reason="auth", allow_fallback=True)
-    if isinstance(exc, (ProxyConnectionError, ProxyError, httpx.ProxyError, httpx.ConnectError)):
+    if isinstance(target, (ProxyConnectionError, ProxyError, httpx.ProxyError, httpx.ConnectError)):
         return SocksErrorDetails(code="SOCKS_CONNECT_ERROR", reason="connect", allow_fallback=True)
-    if isinstance(exc, (ProxyTimeoutError, httpx.ConnectTimeout)):
+    if isinstance(target, (ProxyTimeoutError, httpx.ConnectTimeout)):
         return SocksErrorDetails(code="SOCKS_TIMEOUT", reason="timeout", allow_fallback=True)
-    if isinstance(exc, httpx.ReadTimeout):
+    if isinstance(target, httpx.ReadTimeout):
         return SocksErrorDetails(code="SOCKS_TIMEOUT", reason="timeout", allow_fallback=False)
     return None
 
@@ -260,8 +273,8 @@ class HttpClientFactory:
     def _proxy_url(self) -> str:
         auth = ""
         if self._settings.llm_socks_username:
-            username = self._settings.llm_socks_username
-            password = self._settings.llm_socks_password or ""
+            username = quote(self._settings.llm_socks_username, safe="")
+            password = quote(self._settings.llm_socks_password or "", safe="")
             auth = f"{username}:{password}@"
         return f"{self._settings.llm_socks_type}://{auth}{self._settings.llm_socks_endpoint}"
 
