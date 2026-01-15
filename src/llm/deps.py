@@ -7,11 +7,13 @@ from llm.services.chat_provider import OpenAIChatProvider
 from llm.services.client import CachedQueuedChatOpenAI, create_custom_llm
 from llm.services.priority_queue import PriorityChatQueue
 from llm.services.provider_protocol import ChatProvider
+from llm.services.transport import HttpClientFactory
 
 _llm_instance: CachedQueuedChatOpenAI | None = None
 _chat_provider: ChatProvider | None = None
 _chat_queue: PriorityChatQueue | None = None
 _shared_cache: SQLiteCache | None = None
+_http_client_factory: HttpClientFactory | None = None
 
 
 def build_cache(settings: Settings) -> SQLiteCache:
@@ -38,7 +40,15 @@ def build_llm(settings: Settings) -> CachedQueuedChatOpenAI:
     """
     global _llm_instance
     if _llm_instance is None:
-        _llm_instance = create_custom_llm(settings, cache=build_cache(settings))
+        transport_factory = build_http_client_factory(settings)
+        provider_name = OpenAIChatProvider.provider_name
+        transport_choice = transport_factory.resolve_policy(provider_name)
+        _llm_instance = create_custom_llm(
+            settings,
+            cache=build_cache(settings),
+            http_async_client=transport_factory.get_async_client(transport_choice),
+            http_client=transport_factory.get_client(transport_choice),
+        )
     return _llm_instance
 
 def get_llm(settings: Settings = Depends(get_settings)) -> CachedQueuedChatOpenAI:
@@ -51,8 +61,23 @@ def get_llm(settings: Settings = Depends(get_settings)) -> CachedQueuedChatOpenA
 def build_chat_provider(settings: Settings) -> ChatProvider:
     global _chat_provider
     if _chat_provider is None:
-        _chat_provider = OpenAIChatProvider(settings, cache=build_cache(settings))
+        _chat_provider = OpenAIChatProvider(
+            settings,
+            cache=build_cache(settings),
+            transport_factory=build_http_client_factory(settings),
+        )
     return _chat_provider
+
+
+def build_http_client_factory(settings: Settings) -> HttpClientFactory:
+    global _http_client_factory
+    if _http_client_factory is None:
+        _http_client_factory = HttpClientFactory(settings)
+    return _http_client_factory
+
+
+def get_http_client_factory(settings: Settings = Depends(get_settings)) -> HttpClientFactory:
+    return build_http_client_factory(settings)
 
 
 def get_chat_provider(settings: Settings = Depends(get_settings)) -> ChatProvider:
@@ -81,10 +106,13 @@ def get_chat_queue(
 
 
 def reset_chat_dependencies() -> None:
-    global _chat_queue, _chat_provider, _llm_instance, _shared_cache
+    global _chat_queue, _chat_provider, _llm_instance, _shared_cache, _http_client_factory
     _chat_queue = None
     _chat_provider = None
     _llm_instance = None
     if _shared_cache is not None:
         _shared_cache.close()
     _shared_cache = None
+    if _http_client_factory is not None:
+        _http_client_factory.close()
+    _http_client_factory = None

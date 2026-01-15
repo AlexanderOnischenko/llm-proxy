@@ -13,6 +13,7 @@ from llm.metrics.prometheus import router as metrics_router
 from llm.middleware.request_logging import DebugRequestLoggingMiddleware, RequestIdMiddleware
 from llm.routers.chat import router as chat_router
 from llm.routers.llm import router as llm_router
+from llm.routers.status import router as status_router
 
 
 def _assert_single_process_runtime() -> None:
@@ -49,8 +50,10 @@ def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         cache = None
+        transport_factory = None
         try:
             cache = llm_deps.build_cache(settings)
+            transport_factory = llm_deps.build_http_client_factory(settings)
             llm_deps.build_llm(settings)
             provider = llm_deps.build_chat_provider(settings)
             llm_deps.build_chat_queue(settings, provider)
@@ -61,6 +64,16 @@ def create_app() -> FastAPI:
                 override_display,
                 "sender model ignored" if override else "sender model respected",
             )
+            socks_config = transport_factory.socks_config_view()
+            if socks_config.enabled:
+                logger.info(
+                    "SOCKS proxy enabled: %s://%s",
+                    socks_config.type,
+                    socks_config.endpoint,
+                )
+            else:
+                logger.info("SOCKS proxy disabled")
+            logger.info("SOCKS strict mode: %s", socks_config.strict)
             logger.info("Startup: cache initialized, dependencies warmed")
             yield
         finally:
@@ -69,6 +82,8 @@ def create_app() -> FastAPI:
                     cache.close()
                 except Exception:
                     logger.exception("Failed to close cache")
+            if transport_factory is not None:
+                await transport_factory.aclose()
 
     app = FastAPI(
         title="LLM Proxy API",
@@ -85,6 +100,7 @@ def create_app() -> FastAPI:
 
     app.include_router(llm_router, tags=["llm"])
     app.include_router(chat_router, tags=["chat"])
+    app.include_router(status_router, tags=["status"])
     app.include_router(metrics_router, tags=["metrics"])
 
     return app

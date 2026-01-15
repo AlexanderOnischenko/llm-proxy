@@ -9,18 +9,26 @@ from llm.config.settings import Settings
 from llm.logging_config import get_logger
 from llm.models.chat import ChatCompletionRequest
 from llm.services.cache import SQLiteCache, make_key
+from llm.services.transport import HttpClientFactory, TransportChoice
 
 logger = get_logger(__name__)
 
 
 class OpenAIChatProvider:
-    def __init__(self, settings: Settings, *, cache: SQLiteCache | None = None):
-        self._client = AsyncOpenAI(
-            api_key=settings.llm_api_key,
-            base_url=str(settings.llm_api_base),
-            timeout=settings.llm_timeout,
-        )
+    provider_name = "openai"
+
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        cache: SQLiteCache | None = None,
+        transport_factory: HttpClientFactory,
+    ):
+        self._transport_factory = transport_factory
+        self._clients: dict[TransportChoice, AsyncOpenAI] = {}
         self._base_url = str(settings.llm_api_base)
+        self._api_key = settings.llm_api_key
+        self._timeout = settings.llm_timeout
         self._default_model = settings.llm_default_model_name
         self._model_override = settings.llm_model_override
         self._default_temperature = settings.llm_temperature
@@ -35,6 +43,20 @@ class OpenAIChatProvider:
                 ttl_seconds=int(getattr(settings, "llm_cache_ttl", 0) or 0),
                 enabled=bool(getattr(settings, "llm_cache_enabled", False)),
             )
+
+    def _get_client(self, transport: TransportChoice) -> AsyncOpenAI:
+        client = self._clients.get(transport)
+        if client is not None:
+            return client
+        http_client = self._transport_factory.get_async_client(transport)
+        client = AsyncOpenAI(
+            api_key=self._api_key,
+            base_url=self._base_url,
+            timeout=self._timeout,
+            http_client=http_client,
+        )
+        self._clients[transport] = client
+        return client
 
     def _cache_key(self, payload: dict[str, Any]) -> str:
         digest = make_key(
@@ -56,17 +78,23 @@ class OpenAIChatProvider:
         key = self._cache_key(payload)
 
         async def _call_provider() -> dict[str, Any]:
-            try:
-                response = await self._client.chat.completions.create(**payload)
-            except OpenAIError:
-                logger.exception("Provider error while executing chat completion")
-                raise
+            async def _request(transport: TransportChoice) -> dict[str, Any]:
+                try:
+                    response = await self._get_client(transport).chat.completions.create(**payload)
+                except OpenAIError:
+                    logger.exception("Provider error while executing chat completion")
+                    raise
+                if hasattr(response, "model_dump"):
+                    return response.model_dump()  # type: ignore[no-any-return]
+                if hasattr(response, "dict"):
+                    return response.dict()  # type: ignore[no-any-return]
+                return response  # type: ignore[no-any-return]
 
-            if hasattr(response, "model_dump"):
-                return response.model_dump()  # type: ignore[no-any-return]
-            if hasattr(response, "dict"):
-                return response.dict()  # type: ignore[no-any-return]
-            return response  # type: ignore[no-any-return]
+            return await self._transport_factory.execute(
+                self.provider_name,
+                self._base_url,
+                _request,
+            )
 
         def _on_hit(k: str) -> None:
             logger.info("[CACHE HIT] /v1/chat key=%s model=%s", k, payload.get("model"))
