@@ -8,8 +8,8 @@
       "connect": { "host": "localhost", "port": 5678 },
       "pathMappings": [
         {
-          "localRoot": "${workspaceFolder}/llm/src",
-          "remoteRoot": "/home/appuser/app"
+          "localRoot": "${workspaceFolder}/src/llm",
+          "remoteRoot": "/home/appuser/app/src/llm"
         },
       ],
       "justMyCode": true
