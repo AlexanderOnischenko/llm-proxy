@@ -312,7 +312,7 @@ class HttpClientFactory:
         )
         async with httpx.AsyncClient(transport=transport_layer, timeout=timeout) as client:
             try:
-                response = await client.get("http://example.com", follow_redirects=True)
+                response = await client.get(str(self._settings.llm_api_base), follow_redirects=True)
                 return True, f"Auth ok (HTTP {response.status_code})"
             except Exception as exc:  # noqa: BLE001
                 details = _classify_socks_error(exc)
