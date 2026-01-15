@@ -73,6 +73,7 @@ class HttpClientFactory:
         self._socks_client: httpx.Client | None = None
         self._socks_error: str | None = None
         self._socks_last_checked: datetime | None = None
+        self._limits = httpx.Limits(max_connections=100, max_keepalive_connections=20)
 
     def socks_config_view(self) -> SocksConfigView:
         return SocksConfigView(
@@ -111,7 +112,7 @@ class HttpClientFactory:
         if transport == "direct":
             if self._direct_async_client is None:
                 timeout = httpx.Timeout(self._settings.llm_timeout)
-                self._direct_async_client = httpx.AsyncClient(timeout=timeout)
+                self._direct_async_client = httpx.AsyncClient(timeout=timeout, limits=self._limits)
             return self._direct_async_client
 
         if self._socks_async_client is None:
@@ -123,14 +124,18 @@ class HttpClientFactory:
                 pool=self._settings.llm_socks_connect_timeout,
             )
             transport_layer = AsyncProxyTransport.from_url(proxy_url)
-            self._socks_async_client = httpx.AsyncClient(transport=transport_layer, timeout=timeout)
+            self._socks_async_client = httpx.AsyncClient(
+                transport=transport_layer,
+                timeout=timeout,
+                limits=self._limits,
+            )
         return self._socks_async_client
 
     def get_client(self, transport: TransportChoice) -> httpx.Client:
         if transport == "direct":
             if self._direct_client is None:
                 timeout = httpx.Timeout(self._settings.llm_timeout)
-                self._direct_client = httpx.Client(timeout=timeout)
+                self._direct_client = httpx.Client(timeout=timeout, limits=self._limits)
             return self._direct_client
 
         if self._socks_client is None:
@@ -142,7 +147,11 @@ class HttpClientFactory:
                 pool=self._settings.llm_socks_connect_timeout,
             )
             transport_layer = SyncProxyTransport.from_url(proxy_url)
-            self._socks_client = httpx.Client(transport=transport_layer, timeout=timeout)
+            self._socks_client = httpx.Client(
+                transport=transport_layer,
+                timeout=timeout,
+                limits=self._limits,
+            )
         return self._socks_client
 
     async def execute(
@@ -258,17 +267,6 @@ class HttpClientFactory:
         for client in sync_clients:
             if client is not None:
                 client.close()
-
-    def close(self) -> None:
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-
-        if loop and loop.is_running():
-            loop.create_task(self.aclose())
-            return
-        asyncio.run(self.aclose())
 
     def _proxy_url(self) -> str:
         auth = ""

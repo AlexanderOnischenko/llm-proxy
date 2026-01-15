@@ -1,4 +1,6 @@
 # src/deps.py
+import asyncio
+
 from fastapi import Depends
 
 from llm.config.settings import Settings, get_settings
@@ -114,5 +116,17 @@ def reset_chat_dependencies() -> None:
         _shared_cache.close()
     _shared_cache = None
     if _http_client_factory is not None:
-        _http_client_factory.close()
+        _close_http_client_factory(_http_client_factory)
     _http_client_factory = None
+
+
+def _close_http_client_factory(factory: HttpClientFactory) -> None:
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        loop.create_task(factory.aclose())
+        return
+    asyncio.run(factory.aclose())
