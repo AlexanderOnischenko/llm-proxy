@@ -987,22 +987,60 @@ service_port() {
   printf '%s\n' "$port"
 }
 
-service_status() {
-  local name="$1"
-  local port url
-  port="$(service_port "$name")"
-  url="http://127.0.0.1:${port}/status"
-  if ! command -v curl >/dev/null 2>&1; then
-    warn "curl not found; skipping /status fetch"
+_python_bin() {
+  if command -v python3 >/dev/null 2>&1; then
+    command -v python3
     return 0
   fi
-  if ! curl -fsS "$url" >/tmp/llm_proxy_status.json 2>/dev/null; then
+  if command -v python >/dev/null 2>&1; then
+    command -v python
+    return 0
+  fi
+  return 1
+}
+
+fetch_json() {
+  local url="$1"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsS "$url"
+    return $?
+  fi
+
+  local py
+  if ! py="$(_python_bin)"; then
+    return 1
+  fi
+
+  "$py" - "$url" <<'PY'
+import json
+import sys
+import urllib.request
+
+url = sys.argv[1]
+with urllib.request.urlopen(url, timeout=5) as resp:
+    body = resp.read()
+sys.stdout.write(body.decode("utf-8"))
+PY
+}
+
+service_status() {
+  local name="$1"
+  local port url response py
+  port="$(service_port "$name")"
+  url="http://127.0.0.1:${port}/status"
+
+  if ! response="$(fetch_json "$url")"; then
     warn "unable to reach service status at $url"
     return 0
   fi
 
+  if ! py="$(_python_bin)"; then
+    warn "python not found; unable to parse /status response"
+    return 0
+  fi
+
   printf '\nService status:\n'
-  python - <<'PY' </tmp/llm_proxy_status.json
+  printf '%s' "$response" | "$py" - <<'PY'
 import json
 import sys
 
@@ -1019,26 +1057,23 @@ print(f"  socks.strict: {config.get('strict')}")
 print(f"  socks.username_set: {config.get('username_set')}")
 print(f"  socks.runtime.status: {runtime.get('status')}")
 if runtime.get("error"):
-    print(f\"  socks.runtime.error: {runtime.get('error')}\")
+    print(f"  socks.runtime.error: {runtime.get('error')}")
 if runtime.get("last_checked_at"):
-    print(f\"  socks.runtime.last_checked_at: {runtime.get('last_checked_at')}\")
+    print(f"  socks.runtime.last_checked_at: {runtime.get('last_checked_at')}")
 PY
-  rm -f /tmp/llm_proxy_status.json
 }
 
 service_doctor() {
   local name="$1"
-  local port url
+  local port url response
   port="$(service_port "$name")"
   url="http://127.0.0.1:${port}/doctor"
-  if ! command -v curl >/dev/null 2>&1; then
-    warn "curl not found; unable to run doctor"
-    return 1
-  fi
-  if ! curl -fsS "$url"; then
+
+  if ! response="$(fetch_json "$url")"; then
     warn "unable to reach service doctor at $url"
     return 1
   fi
+  printf '%s\n' "$response"
 }
 
 compose_logs() {
