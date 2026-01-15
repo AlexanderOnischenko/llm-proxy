@@ -978,9 +978,9 @@ compose_status() {
 
 service_port() {
   local name="$1"
-  local runtime_env port
-  runtime_env="$(profile_runtime_env_path "$name")"
-  port="$(envfile_get "$runtime_env" "LLM_PORT" 2>/dev/null || true)"
+  local compose_env port
+  compose_env="$(profile_compose_env_path "$name")"
+  port="$(envfile_get "$compose_env" "LLM_PORT" 2>/dev/null || true)"
   if [[ -z "$port" ]]; then
     port="8002"
   fi
