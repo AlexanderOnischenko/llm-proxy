@@ -45,38 +45,31 @@ class SocksProxyError(RuntimeError):
         self.code = code
 
 
-def _unwrap_exception(exc: Exception) -> Exception:
-    current = exc
+def _iter_exception_chain(exc: Exception) -> list[Exception]:
+    chain: list[Exception] = []
+    current: Exception | None = exc
     seen: set[int] = set()
-    while True:
+    while current is not None:
         current_id = id(current)
         if current_id in seen:
-            return current
+            break
         seen.add(current_id)
+        chain.append(current)
         candidate = getattr(current, "__cause__", None) or getattr(current, "__context__", None)
-        if candidate is None or candidate is current:
-            return current
-        if isinstance(candidate, Exception):
-            current = candidate
-            continue
-        return current
+        if candidate is None or candidate is current or not isinstance(candidate, Exception):
+            break
+        current = candidate
+    return chain
 
 
 def _classify_socks_error(exc: Exception) -> SocksErrorDetails | None:
-    target = _unwrap_exception(exc)
-    if _PROXY_AUTH_ERRORS and isinstance(target, _PROXY_AUTH_ERRORS):
-        return SocksErrorDetails(code="SOCKS_AUTH_ERROR", reason="auth")
-    if isinstance(target, (ProxyConnectionError, ProxyError, httpx.ProxyError, httpx.ConnectError)):
-        return SocksErrorDetails(code="SOCKS_CONNECT_ERROR", reason="connect")
-    if isinstance(
-        target,
-        (ProxyTimeoutError, httpx.ConnectTimeout, httpx.PoolTimeout, httpx.WriteTimeout),
-    ):
-        return SocksErrorDetails(code="SOCKS_TIMEOUT", reason="timeout")
-    if isinstance(target, httpx.ReadTimeout):
-        # Read timeouts can indicate upstream slowness rather than proxy failure, so
-        # we avoid forcing a fallback that might mask upstream issues.
-        return SocksErrorDetails(code="SOCKS_TIMEOUT", reason="timeout")
+    for candidate in _iter_exception_chain(exc):
+        if _PROXY_AUTH_ERRORS and isinstance(candidate, _PROXY_AUTH_ERRORS):
+            return SocksErrorDetails(code="SOCKS_AUTH_ERROR", reason="auth")
+        if isinstance(candidate, ProxyTimeoutError):
+            return SocksErrorDetails(code="SOCKS_TIMEOUT", reason="timeout")
+        if isinstance(candidate, (ProxyConnectionError, ProxyError)):
+            return SocksErrorDetails(code="SOCKS_CONNECT_ERROR", reason="connect")
     return None
 
 
@@ -182,6 +175,10 @@ class HttpClientFactory:
     def note_socks_error(self, provider_name: str, exc: Exception) -> SocksErrorDetails | None:
         details = _classify_socks_error(exc)
         if details is None:
+            logger.debug(
+                "Non-proxy error while using SOCKS; propagating unchanged",
+                exc_info=True,
+            )
             return None
         self._mark_socks_error(details.code)
         record_socks_error(provider_name, details.reason)
