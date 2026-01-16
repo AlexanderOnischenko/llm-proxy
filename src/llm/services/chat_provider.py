@@ -26,7 +26,7 @@ class OpenAIChatProvider:
         transport_factory: HttpClientFactory,
     ):
         self._transport_factory = transport_factory
-        self._transport = transport_factory.resolve_policy(self.provider_name)
+        self._transport: TransportChoice = transport_factory.resolve_policy(self.provider_name)
         self._clients: dict[TransportChoice, AsyncOpenAI] = {}
         self._base_url = str(settings.llm_api_base)
         self._api_key = settings.llm_api_key
