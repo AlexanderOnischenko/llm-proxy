@@ -1031,12 +1031,12 @@ service_status() {
 
   if ! response="$(fetch_json "$url")"; then
     warn "unable to reach service status at $url"
-    return 0
+    return 1
   fi
 
   if ! py="$(_python_bin)"; then
     warn "python not found; unable to parse /status response"
-    return 0
+    return 1
   fi
 
   printf '\nService status:\n'
