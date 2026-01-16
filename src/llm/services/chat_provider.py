@@ -9,7 +9,8 @@ from llm.config.settings import Settings
 from llm.logging_config import get_logger
 from llm.models.chat import ChatCompletionRequest
 from llm.services.cache import SQLiteCache, make_key
-from llm.services.transport import HttpClientFactory, TransportChoice
+from llm.metrics.socks import record_transport
+from llm.services.transport import HttpClientFactory, SocksProxyError, TransportChoice
 
 logger = get_logger(__name__)
 
@@ -25,6 +26,7 @@ class OpenAIChatProvider:
         transport_factory: HttpClientFactory,
     ):
         self._transport_factory = transport_factory
+        self._transport = transport_factory.resolve_policy(self.provider_name)
         self._clients: dict[TransportChoice, AsyncOpenAI] = {}
         self._base_url = str(settings.llm_api_base)
         self._api_key = settings.llm_api_key
@@ -78,23 +80,27 @@ class OpenAIChatProvider:
         key = self._cache_key(payload)
 
         async def _call_provider() -> dict[str, Any]:
-            async def _request(transport: TransportChoice) -> dict[str, Any]:
-                try:
-                    response = await self._get_client(transport).chat.completions.create(**payload)
-                except OpenAIError:
-                    logger.exception("Provider error while executing chat completion")
-                    raise
-                if hasattr(response, "model_dump"):
-                    return response.model_dump()  # type: ignore[no-any-return]
-                if hasattr(response, "dict"):
-                    return response.dict()  # type: ignore[no-any-return]
-                return response  # type: ignore[no-any-return]
-
-            return await self._transport_factory.execute(
-                self.provider_name,
-                self._base_url,
-                _request,
-            )
+            record_transport(self.provider_name, self._transport)
+            try:
+                response = await self._get_client(self._transport).chat.completions.create(
+                    **payload
+                )
+            except OpenAIError:
+                logger.exception("Provider error while executing chat completion")
+                raise
+            except Exception as exc:  # noqa: BLE001
+                if self._transport == "socks":
+                    details = self._transport_factory.note_socks_error(self.provider_name, exc)
+                    if details is not None:
+                        raise SocksProxyError(details.code, str(exc)) from exc
+                raise
+            if self._transport == "socks":
+                self._transport_factory.note_socks_success()
+            if hasattr(response, "model_dump"):
+                return response.model_dump()  # type: ignore[no-any-return]
+            if hasattr(response, "dict"):
+                return response.dict()  # type: ignore[no-any-return]
+            return response  # type: ignore[no-any-return]
 
         def _on_hit(k: str) -> None:
             logger.info("[CACHE HIT] /v1/chat key=%s model=%s", k, payload.get("model"))

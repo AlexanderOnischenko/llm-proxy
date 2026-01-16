@@ -3,8 +3,8 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable, Literal
-from urllib.parse import quote, urlparse
+from typing import Literal
+from urllib.parse import quote
 
 import httpx
 import python_socks
@@ -13,7 +13,7 @@ from python_socks import ProxyConnectionError, ProxyError, ProxyTimeoutError
 
 from llm.config.settings import Settings
 from llm.logging_config import get_logger
-from llm.metrics.socks import record_socks_error, record_transport
+from llm.metrics.socks import record_socks_error
 from llm.models.status import DoctorCheck, DoctorReport, SocksConfigView, SocksRuntimeStatus
 
 
@@ -172,38 +172,21 @@ class HttpClientFactory:
             )
         return self._socks_client
 
-    async def execute(
-        self,
-        provider_name: str,
-        target_url: str,
-        request_fn: Callable[[TransportChoice], Awaitable[dict[str, Any]]],
-    ) -> dict[str, Any]:
-        transport = self.resolve_policy(provider_name)
-        target_host = urlparse(target_url).netloc or target_url
+    def note_socks_success(self) -> None:
+        self._mark_socks_ok()
 
-        if transport == "direct":
-            logger.debug("provider=%s transport=direct target=%s", provider_name, target_host)
-            record_transport(provider_name, "direct")
-            return await request_fn("direct")
-
-        logger.debug("provider=%s transport=socks target=%s", provider_name, target_host)
-        record_transport(provider_name, "socks")
-        try:
-            result = await request_fn("socks")
-            self._mark_socks_ok()
-            return result
-        except Exception as exc:  # noqa: BLE001
-            details = _classify_socks_error(exc)
-            if details is None:
-                raise
-            self._mark_socks_error(details.code)
-            record_socks_error(provider_name, details.reason)
-            logger.error(
-                "SOCKS request failed; no direct fallback (provider=%s reason=%s)",
-                provider_name,
-                details.code,
-            )
-            raise SocksProxyError(details.code, str(exc)) from exc
+    def note_socks_error(self, provider_name: str, exc: Exception) -> SocksErrorDetails | None:
+        details = _classify_socks_error(exc)
+        if details is None:
+            return None
+        self._mark_socks_error(details.code)
+        record_socks_error(provider_name, details.reason)
+        logger.error(
+            "SOCKS request failed; no direct fallback (provider=%s reason=%s)",
+            provider_name,
+            details.code,
+        )
+        return details
 
     async def run_doctor(self) -> DoctorReport:
         checks: list[DoctorCheck] = []
