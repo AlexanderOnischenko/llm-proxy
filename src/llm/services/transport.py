@@ -46,7 +46,12 @@ class SocksProxyError(RuntimeError):
 
 def _unwrap_exception(exc: Exception) -> Exception:
     current = exc
+    seen: set[int] = set()
     while True:
+        current_id = id(current)
+        if current_id in seen:
+            return current
+        seen.add(current_id)
         candidate = getattr(current, "__cause__", None) or getattr(current, "__context__", None)
         if candidate is None or candidate is current:
             return current

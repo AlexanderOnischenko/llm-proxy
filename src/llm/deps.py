@@ -120,6 +120,19 @@ def reset_chat_dependencies() -> None:
     _http_client_factory = None
 
 
+async def reset_chat_dependencies_async() -> None:
+    global _chat_queue, _chat_provider, _llm_instance, _shared_cache, _http_client_factory
+    _chat_queue = None
+    _chat_provider = None
+    _llm_instance = None
+    if _shared_cache is not None:
+        _shared_cache.close()
+    _shared_cache = None
+    if _http_client_factory is not None:
+        await _http_client_factory.aclose()
+    _http_client_factory = None
+
+
 def _close_http_client_factory(factory: HttpClientFactory) -> None:
     try:
         loop = asyncio.get_running_loop()
