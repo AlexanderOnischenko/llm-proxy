@@ -85,8 +85,16 @@ class OpenAIChatProvider:
                 response = await self._get_client(self._transport).chat.completions.create(
                     **payload
                 )
-            except OpenAIError:
+            except OpenAIError as exc:
                 logger.exception("Provider error while executing chat completion")
+                if self._transport == "socks":
+                    details = self._transport_factory.note_socks_error(self.provider_name, exc)
+                    if details is not None:
+                        message = (
+                            f"{exc} (transport={self._transport} "
+                            f"endpoint={self._transport_factory.socks_endpoint})"
+                        )
+                        raise SocksProxyError(details.code, message) from exc
                 raise
             except Exception as exc:  # noqa: BLE001
                 if self._transport == "socks":
