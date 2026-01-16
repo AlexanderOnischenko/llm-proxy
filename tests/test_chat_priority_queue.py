@@ -9,7 +9,11 @@ pytestmark = pytest.mark.anyio
 from prometheus_client import CONTENT_TYPE_LATEST  # noqa: E402
 
 from llm.config.settings import reset_settings_overrides  # noqa: E402
-from llm.deps import get_chat_queue, get_llm, reset_chat_dependencies  # noqa: E402
+from llm.deps import (  # noqa: E402
+    get_chat_queue,
+    get_llm,
+    reset_chat_dependencies_async,
+)
 from llm.main import app  # noqa: E402
 from llm.models.chat import ChatCompletionRequest  # noqa: E402
 from llm.services.priority_queue import PriorityChatQueue  # noqa: E402
@@ -82,13 +86,13 @@ class DummyLLM:
 
 
 @pytest.fixture(autouse=True)
-def _cleanup_overrides():
+async def _cleanup_overrides():
     app.dependency_overrides.clear()
-    reset_chat_dependencies()
+    await reset_chat_dependencies_async()
     reset_settings_overrides()
     yield
     app.dependency_overrides.clear()
-    reset_chat_dependencies()
+    await reset_chat_dependencies_async()
     reset_settings_overrides()
 
 

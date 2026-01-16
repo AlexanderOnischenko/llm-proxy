@@ -1,0 +1,310 @@
+use_cases:
+  - id: UC-1
+    title: "Обработать chat completion с выбором транспорта direct|socks"
+    alias: "ProcessChatCompletionWithSocksPolicy"
+    goal: "Клиент получает OpenAI-совместимый ответ (успех или ошибка) с однозначно зафиксированным финальным транспортом (direct|socks) и наблюдаемыми свидетелями fallback/strict-решений. fileciteturn0file0 fileciteturn0file1"
+    primary_actor: "External Client"
+    secondary_actors: ["LLM Proxy Service", "Upstream LLM Provider", "Operator/DevOps", "Prometheus"]
+    trigger:
+      node_id: "N-CALL-01"
+      trigger_type: "user_command"
+      description: "HTTP POST /v1/chat/completions инициирует обработку запроса и резолвинг SOCKS-политики на provider_name."
+    preconditions:
+      - "Сервис запущен и способен принимать запросы."
+      - "Настройки SOCKS (глобальные и overrides) загружены в процесс (версионированные CTRL объекты)."
+    main_flow:
+      - id: "1"
+        text: "Получить внешний запрос chat completion и определить provider_name. (N-CALL-01)"
+      - id: "2"
+        text: "Разрешить SOCKS-политику для provider_name и зафиксировать требуемый транспорт direct|socks. (N-DEC-01)"
+      - id: "3"
+        text: "Зафиксировать per-request debug-свидетель: provider, transport, target host (ровно один финальный transport на запрос). (N-OBS-04)"
+      - id: "4"
+        text: "Выбрать конкретный экземпляр HTTP-клиента (direct или socks) из фабрики с учетом settings_snapshot_hash. (N-DEC-02)"
+      - id: "5"
+        text: "Если transport=socks — выполнить time-bounded SOCKS connect/auth/handshake до терминального состояния. (N-SCHED-01)"
+      - id: "6"
+        text: "Выполнить boundary-вызов к upstream LLM, используя выбранный транспорт. (N-CALL-06)"
+      - id: "7"
+        text: "Прочитать upstream response в рамках read_timeout до терминального состояния. (N-SCHED-02)"
+      - id: "8"
+        text: "При COMPLETED вернуть успешный OpenAI-совместимый ответ клиенту. (N-OBS-01)"
+      - id: "9"
+        text: "Инкрементировать метрики финального транспорта для провайдера (успех). (N-OBS-07)"
+    alternate_flows:
+      - name: "ReadTimeoutOrUpstreamErrorNoFallback"
+        steps:
+          - id: "7a"
+            text: "При READ_TIMEOUT или UPSTREAM_ERROR сформировать OpenAI-совместимый error response; fallback по умолчанию не выполняется во избежание двойного POST. (N-OBS-02)"
+          - id: "7b"
+            text: "Инкрементировать метрики финального транспорта для провайдера (ошибка). (N-OBS-07)"
+      - name: "SocksPreHandshakeFailureStrictAbort"
+        steps:
+          - id: "5a"
+            text: "При FAILED_CONNECT/FAILED_AUTH/FAILED_TIMEOUT классифицировать SOCKS-ошибку в стабильный SOCKS_* reason и принять решение strict-abort. (N-DEC-03)"
+          - id: "5b"
+            text: "Инкрементировать метрику SOCKS-ошибок по provider и reason (контрактные коды). (N-OBS-08)"
+          - id: "5c"
+            text: "Зафиксировать error-level свидетель strict abort с provider+reason. (N-OBS-06)"
+          - id: "5d"
+            text: "Вернуть клиенту стабильный SOCKS_* error response без direct fallback. (N-OBS-02)"
+          - id: "5e"
+            text: "Инкрементировать метрики финального транспорта для провайдера (ошибка). (N-OBS-07)"
+      - name: "SocksPreHandshakeFailureNonStrictFallbackSuccess"
+        steps:
+          - id: "5a"
+            text: "При FAILED_CONNECT/FAILED_AUTH/FAILED_TIMEOUT классифицировать SOCKS-ошибку и разрешить fallback в non-strict режиме. (N-DEC-03)"
+          - id: "5b"
+            text: "Инкрементировать метрику SOCKS-ошибок по provider и reason. (N-OBS-08)"
+          - id: "5c"
+            text: "Проверить дедупликацию fallback: разрешить не более одной direct-попытки на (request_id, provider_name). (N-DEC-04)"
+          - id: "5d"
+            text: "Зафиксировать warn-свидетель о fallback с reason и fallback_attempt=1. (N-OBS-05)"
+          - id: "5e"
+            text: "Повторно выбрать HTTP-клиент с принудительным transport=direct для attempt=2 (единственный допустимый fallback). (N-DEC-02)"
+          - id: "5f"
+            text: "Выполнить upstream вызов (attempt=2) и дочитать ответ по стандартному потоку до N-OBS-01 или N-OBS-02. (N-CALL-06 → N-SCHED-02)"
+          - id: "5g"
+            text: "Инкрементировать метрики финального транспорта по фактическому исходу (успех/ошибка). (N-OBS-07)"
+      - name: "SocksPreHandshakeFailureNonStrictFallbackAlreadyAttemptedNoOp"
+        steps:
+          - id: "5a"
+            text: "При повторном триггере fallback зафиксировать решение 'already_attempted' и не выполнять скрытых повторных upstream-вызовов. (N-DEC-04)"
+          - id: "5b"
+            text: "Зафиксировать NoOp/AlreadyAttempted свидетель в логах. (N-OBS-12)"
+          - id: "5c"
+            text: "Завершить запрос ошибкой без дополнительного upstream-вызова (безопасность от множественных попыток). (N-OBS-02)"
+          - id: "5d"
+            text: "Инкрементировать метрики финального транспорта для провайдера (ошибка). (N-OBS-07)"
+      - name: "DependencyUnavailableOrTimeoutDuringOutboundCall"
+        steps:
+          - id: "6a"
+            text: "Если внешний upstream недоступен/таймаутит во время boundary-вызова или чтения — завершить error response по контракту сервиса. (N-OBS-02)"
+          - id: "6b"
+            text: "Инкрементировать метрики транспорта (ошибка). (N-OBS-07)"
+    postconditions:
+      - "Клиент получил ровно один финальный ответ (успех или ошибка)."
+      - "Ровно один финальный transport (direct|socks) наблюдаем через per-request debug и метрики."
+      - "Если был pre-handshake SOCKS failure — есть классификация reason и соответствующие свидетели (лог/метрика), а при non-strict возможен максимум один direct fallback."
+    artifacts_created:
+      - "Выбранный экземпляр httpx.AsyncClient (direct или socks) для запроса/провайдера (long-lived)."
+    events_emitted:
+      - "Инкременты метрик транспорта и/или SOCKS-ошибок (Prometheus exposition)."
+    invariants_enforced:
+      - "Strict=true: при pre-handshake SOCKS failure direct fallback не выполняется и upstream direct-вызов не производится."
+      - "Strict=false: максимум одна direct fallback попытка на (request_id, provider_name)."
+      - "Коды SOCKS_* соответствуют контролируемому контракту."
+    observability_witnesses:
+      - "N-OBS-01"
+      - "N-OBS-02"
+      - "N-OBS-04"
+      - "N-OBS-05"
+      - "N-OBS-06"
+      - "N-OBS-07"
+      - "N-OBS-08"
+      - "N-OBS-12"
+    related_archgraph_paths:
+      - start: "N-CALL-01"
+        end: "N-OBS-01"
+        nodes: ["N-CALL-01", "N-DEC-01", "N-DEC-02", "N-SCHED-01", "N-CALL-06", "N-SCHED-02", "N-OBS-01", "N-OBS-07"]
+        edges: ["E-010", "E-014", "E-020", "E-021", "E-022", "E-023", "E-050"]
+      - start: "N-CALL-01"
+        end: "N-OBS-02"
+        nodes: ["N-CALL-01", "N-DEC-01", "N-DEC-02", "N-SCHED-01", "N-DEC-03", "N-OBS-06", "N-OBS-02", "N-OBS-08", "N-OBS-07"]
+        edges: ["E-010", "E-014", "E-020", "E-030", "E-034", "E-035", "E-033", "E-051"]
+      - start: "N-CALL-01"
+        end: "N-OBS-01"
+        nodes: ["N-CALL-01", "N-DEC-01", "N-DEC-02", "N-SCHED-01", "N-DEC-03", "N-DEC-04", "N-OBS-05", "N-DEC-02", "N-CALL-06", "N-SCHED-02", "N-OBS-01", "N-OBS-07"]
+        edges: ["E-010", "E-014", "E-020", "E-030", "E-040", "E-042", "E-043", "E-044", "E-022", "E-023", "E-050"]
+    non_functional:
+      - "Secret-safe: не логировать username/password и не возвращать секреты в ответах."
+      - "Timeout-bounded: connect_timeout и read_timeout ограничивают длительность стадий (SCHED lifecycles)."
+      - "Observability: structured logs + metrics должны позволять алертинг по reason-кодам."
+    state_driven: true
+
+  - id: UC-2
+    title: "Запросить /status с SOCKS-секцией"
+    alias: "QueryStatusWithSocksSection"
+    goal: "Оператор/SRE получает секретобезопасный агрегированный статус сервиса, включая эффективные SOCKS overrides и runtime-статус. fileciteturn0file0 fileciteturn0file1"
+    primary_actor: "SRE/Operator"
+    secondary_actors: ["StatusRouter", "Operator/DevOps"]
+    trigger:
+      node_id: "N-CALL-02"
+      trigger_type: "user_command"
+      description: "HTTP GET /status запрашивается оператором/CLI."
+    preconditions:
+      - "Сервис запущен и способен отдавать /status."
+    main_flow:
+      - id: "1"
+        text: "Получить внешний запрос GET /status. (N-CALL-02)"
+      - id: "2"
+        text: "Сформировать status JSON с SocksConfigView и SocksRuntimeStatus без секретов. (N-OBS-09)"
+      - id: "3"
+        text: "Включить в ответ секретобезопасную сводку effective per-provider overrides. (N-CTRL-02 → N-OBS-09)"
+    alternate_flows:
+      - name: "StatusRenderingFailure"
+        steps:
+          - id: "2a"
+            text: "Если статус не может быть сформирован (внутренняя ошибка сериализации/сборки) — вернуть ошибку статуса сервиса без утечки секретов."
+    postconditions:
+      - "Оператор получил SocksConfigView и SocksRuntimeStatus в составе /status."
+    artifacts_created: []
+    events_emitted: []
+    invariants_enforced:
+      - "Секреты (username/password) не раскрываются; возможен только флаг наличия."
+    observability_witnesses:
+      - "N-OBS-09"
+    related_archgraph_paths:
+      - start: "N-CALL-02"
+        end: "N-OBS-09"
+        nodes: ["N-CALL-02", "N-OBS-09"]
+        edges: ["E-060"]
+    non_functional:
+      - "Secret-safe payload: без утечек учетных данных."
+      - "Операционная пригодность: структурированная секция socks для быстрой диагностики."
+    state_driven: false
+
+  - id: UC-3
+    title: "Запустить /doctor диагностику SOCKS-доступности"
+    alias: "RunSocksDoctorDiagnostics"
+    goal: "Оператор/SRE получает структурированный DoctorReport по проверкам SOCKS (parse_config/tcp_connect/auth_check/outbound_test) с таймстампами и без секретов. fileciteturn0file0 fileciteturn0file1"
+    primary_actor: "SRE/Operator"
+    secondary_actors: ["SocksDiagnosticsService", "Runtime Network", "DoctorRouter"]
+    trigger:
+      node_id: "N-CALL-03"
+      trigger_type: "user_command"
+      description: "HTTP GET /doctor инициирует последовательный раннер диагностических проверок."
+    preconditions:
+      - "Сервис запущен и способен выполнять сетевые проверки согласно diagnostics policy."
+    main_flow:
+      - id: "1"
+        text: "Получить внешний запрос GET /doctor. (N-CALL-03)"
+      - id: "2"
+        text: "Запланировать и выполнить последовательные doctor checks с таймаутами по policy. (N-SCHED-03)"
+      - id: "3"
+        text: "На стадии outbound_test выполнить boundary тестовый HTTP запрос к целевому URL. (N-CALL-07)"
+      - id: "4"
+        text: "Вернуть структурированный DoctorReport (REPORT_READY) без секретов, включая результаты checks и impact summary. (N-OBS-10)"
+    alternate_flows:
+      - name: "DoctorReportError"
+        steps:
+          - id: "4a"
+            text: "Если раннер завершается в REPORT_ERROR — вернуть DoctorReport с ошибочным состоянием и деталями без секретов. (N-OBS-10)"
+      - name: "DependencyUnavailableDuringOutboundTest"
+        steps:
+          - id: "3a"
+            text: "Если целевой URL недоступен/таймаутит — отразить это как failed check в DoctorReport и завершить REPORT_READY либо REPORT_ERROR в зависимости от policy. (N-OBS-10)"
+    postconditions:
+      - "Оператор получил DoctorReport, пригодный для локализации проблем SOCKS/сети."
+    artifacts_created: []
+    events_emitted: []
+    invariants_enforced:
+      - "Secret-safe: учетные данные не выводятся."
+      - "Проверки выполняются последовательно и time-bounded согласно Diagnostics Policy."
+    observability_witnesses:
+      - "N-OBS-10"
+    related_archgraph_paths:
+      - start: "N-CALL-03"
+        end: "N-OBS-10"
+        nodes: ["N-CALL-03", "N-SCHED-03", "N-CALL-07", "N-OBS-10"]
+        edges: ["E-061", "E-063", "E-064"]
+    non_functional:
+      - "Безопасность: отсутствие секретов в деталях."
+      - "Операционная пригодность: структурированный отчет, пригодный для автоматизации в CLI."
+    state_driven: true
+
+  - id: UC-4
+    title: "Инициализировать SOCKS конфигурацию на старте сервиса"
+    alias: "InitializeSocksConfigOnStartup"
+    goal: "При старте процесса фиксируется примененная версия SOCKS политики (settings_snapshot_hash) и публикуются секретобезопасные startup-свидетели конфигурации. fileciteturn0file0 fileciteturn0file1"
+    primary_actor: "Runtime Platform"
+    secondary_actors: ["Operator/DevOps", "FastAPIApp"]
+    trigger:
+      node_id: "N-CALL-04"
+      trigger_type: "external_event"
+      description: "FastAPI startup lifecycle hook инициирует загрузку и материализацию политики из Settings/ENV."
+    preconditions:
+      - "Процесс стартует с доступными ENV/Settings."
+    main_flow:
+      - id: "1"
+        text: "Получить событие старта приложения. (N-CALL-04)"
+      - id: "2"
+        text: "Материализовать версионированный глобальный SOCKS policy object из Settings/ENV. (N-CTRL-01)"
+      - id: "3"
+        text: "Снять секретобезопасный startup лог: endpoint и strict flag без секретов. (N-OBS-03)"
+      - id: "4"
+        text: "Зафиксировать settings_snapshot_hash как audit witness примененной версии политики. (N-OBS-11)"
+      - id: "5"
+        text: "Материализовать версионированную карту per-provider overrides (если задана). (N-CTRL-02)"
+    alternate_flows:
+      - name: "InvalidSettingsAtStartup"
+        steps:
+          - id: "2a"
+            text: "Если Settings некорректны (например, невалидный endpoint/тип) — зафиксировать диагностический лог без секретов и продолжить в деградированном состоянии согласно политике сервиса."
+    postconditions:
+      - "Есть startup log witness без секретов."
+      - "Есть settings_snapshot_hash witness, позволяющий сопоставлять эквивалентные запуски."
+    artifacts_created:
+      - "Versioned policy objects: global SOCKS settings snapshot и overrides snapshot."
+    events_emitted: []
+    invariants_enforced:
+      - "Секреты не выводятся в логах."
+      - "Версия примененной политики наблюдаема через settings_snapshot_hash."
+    observability_witnesses:
+      - "N-OBS-03"
+      - "N-OBS-11"
+    related_archgraph_paths:
+      - start: "N-CALL-04"
+        end: "N-OBS-11"
+        nodes: ["N-CALL-04", "N-CTRL-01", "N-OBS-11"]
+        edges: ["E-001", "E-003"]
+      - start: "N-CALL-04"
+        end: "N-OBS-03"
+        nodes: ["N-CALL-04", "N-CTRL-01", "N-OBS-03"]
+        edges: ["E-001", "E-002"]
+    non_functional:
+      - "Secret-safe logging at startup."
+      - "Deterministic config witness for audits and debugging."
+    state_driven: false
+
+  - id: UC-5
+    title: "Закрыть HTTP клиентов при остановке сервиса"
+    alias: "ShutdownAndCloseHttpClients"
+    goal: "При shutdown сервис best-effort закрывает long-lived HTTP clients (direct/socks) и публикует наблюдаемый лог исхода (closed или error ignored). fileciteturn0file0 fileciteturn0file1"
+    primary_actor: "Runtime Platform"
+    secondary_actors: ["DependencyGraph", "Operator/DevOps"]
+    trigger:
+      node_id: "N-CALL-05"
+      trigger_type: "external_event"
+      description: "FastAPI shutdown lifecycle hook инициирует best-effort закрытие клиентов."
+    preconditions:
+      - "Процесс находится в стадии завершения и имеет открытые клиенты/пулы."
+    main_flow:
+      - id: "1"
+        text: "Получить событие остановки приложения. (N-CALL-05)"
+      - id: "2"
+        text: "Запланировать best-effort закрытие long-lived HTTP clients и пулов. (N-SCHED-04)"
+      - id: "3"
+        text: "Опубликовать лог-свидетель результата закрытия (CLOSED или CLOSE_ERROR_IGNORED). (N-OBS-03)"
+    alternate_flows:
+      - name: "CloseErrorIgnored"
+        steps:
+          - id: "3a"
+            text: "Если закрытие завершилось ошибкой — зафиксировать свидетель 'error ignored' и не блокировать shutdown. (N-OBS-03)"
+    postconditions:
+      - "Клиенты закрыты или ошибка закрытия зафиксирована и проигнорирована; shutdown не блокируется."
+    artifacts_created: []
+    events_emitted: []
+    invariants_enforced:
+      - "Ошибки закрытия не блокируют завершение процесса (best-effort)."
+    observability_witnesses:
+      - "N-OBS-03"
+    related_archgraph_paths:
+      - start: "N-CALL-05"
+        end: "N-OBS-03"
+        nodes: ["N-CALL-05", "N-SCHED-04", "N-OBS-03"]
+        edges: ["E-070", "E-071"]
+    non_functional:
+      - "Graceful shutdown: best-effort resource cleanup."
+      - "Observability: закрытие клиентов отражено в логах."
+    state_driven: true

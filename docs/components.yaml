@@ -1,0 +1,507 @@
+components:
+- name: CancelRouter
+  structural:
+    layer: TBD
+    type: new
+    scope: TBD
+    dependencies: []
+    needs_logical_view: true
+  semantic:
+    responsibility: HTTP API для отмены ранее принятого запроса и возврата статуса
+      отмены.
+    public_interfaces:
+    - POST /v1/cancel
+    interacts_with:
+    - RequestLifecycleManager
+    - QueueService
+    - PriorityChatQueue
+- name: ChatProvider
+  structural:
+    layer: TBD
+    type: new
+    scope: TBD
+    dependencies: []
+    needs_logical_view: true
+  semantic:
+    responsibility: Абстракция upstream LLM-провайдера; выполняет запрос к upstream
+      с использованием предоставленного HTTP-клиента/транспорта (direct/SOCKS) без
+      прокси-логики внутри провайдера.
+    public_interfaces:
+    - chat_completions(request, http_client)
+    interacts_with:
+    - ClientFactory
+    - DependencyGraph
+    - QueueService
+    - RequestHandler
+    - SocksPolicyResolver
+    - TransportHttpClientFactory
+- name: ChatRouter
+  structural:
+    layer: TBD
+    type: new
+    scope: TBD
+    dependencies: []
+    needs_logical_view: true
+  semantic:
+    responsibility: Экспонирование OpenAI-совместимого API для чата и маршрутизация
+      запросов в обработчик/сервис очереди.
+    public_interfaces:
+    - POST /v1/chat/completions
+    interacts_with:
+    - ChatProvider
+    - PriorityChatQueue
+    - RequestHandler
+    - SQLiteCache
+    - Settings
+    - SocksPolicyResolver
+    - TransportHttpClientFactory
+- name: CLI
+  structural:
+    layer: TBD
+    type: new
+    scope: TBD
+    dependencies: []
+    needs_logical_view: true
+  semantic:
+    responsibility: CLI-утилита для управления runtime (up/down/logs/status) и сетевой
+      диагностики (doctor) через HTTP API сервиса.
+    public_interfaces:
+    - llm-proxy up
+    - llm-proxy down
+    - llm-proxy logs
+    - llm-proxy status
+    - llm-proxy doctor
+    interacts_with:
+    - FastAPIApp
+    - StatusRouter
+    - DoctorRouter
+- name: ClientFactory
+  structural:
+    layer: TBD
+    type: new
+    scope: TBD
+    dependencies: []
+    needs_logical_view: true
+  semantic:
+    responsibility: Создание LangChain/OpenAI-совместимых клиентов с инъекцией готового
+      HTTP async client (когда поддержано интеграцией).
+    public_interfaces:
+    - create_custom_llm(provider_name, model, http_client)
+    interacts_with:
+    - DependencyGraph
+    - TransportHttpClientFactory
+    - ChatProvider
+    - Wrapper
+- name: DependencyGraph
+  structural:
+    layer: TBD
+    type: new
+    scope: TBD
+    dependencies: []
+    needs_logical_view: true
+  semantic:
+    responsibility: Создание и предоставление singleton-зависимостей (очередь, кэш,
+      провайдеры, фабрики транспорта/HTTP-клиента, политики SOCKS); best-effort закрытие
+      клиентов на shutdown.
+    public_interfaces:
+    - get_cache()
+    - get_chat_provider()
+    - get_chat_queue()
+    - get_client_factory()
+    - get_http_client_factory()
+    - get_request_lifecycle_manager()
+    - get_socks_policy_resolver()
+    - shutdown_dependencies()
+    interacts_with:
+    - ChatProvider
+    - ClientFactory
+    - DoctorRouter
+    - PriorityChatQueue
+    - QueueService
+    - RequestLifecycleManager
+    - SQLiteCache
+    - Settings
+    - SocksPolicyResolver
+    - StatusRouter
+    - TokenLimitEnforcer
+    - TransportHttpClientFactory
+- name: DoctorRouter
+  structural:
+    layer: TBD
+    type: new
+    scope: TBD
+    dependencies: []
+    needs_logical_view: true
+  semantic:
+    responsibility: 'HTTP API для сетевой диагностики SOCKS: выполняет проверки (парсинг
+      конфига, tcp_connect, auth при наличии, outbound_test) и возвращает структурированный
+      отчёт.'
+    public_interfaces:
+    - GET /doctor
+    interacts_with:
+    - FastAPIApp
+    - Settings
+    - SocksDiagnosticsService
+    - TransportHttpClientFactory
+    - DependencyGraph
+- name: FastAPIApp
+  structural:
+    layer: TBD
+    type: new
+    scope: TBD
+    dependencies: []
+    needs_logical_view: true
+  semantic:
+    responsibility: Инициализация FastAPI приложения, регистрация роутеров и lifecycle
+      (startup/shutdown); вывод startup-логов конфигурации (в т.ч. SOCKS без секретов).
+    public_interfaces:
+    - ASGI app
+    interacts_with:
+    - CancelRouter
+    - ChatRouter
+    - DependencyGraph
+    - DoctorRouter
+    - HealthRouter
+    - MetricsRouter
+    - Settings
+    - SettingsRouter
+    - StatusRouter
+- name: HealthRouter
+  structural:
+    layer: TBD
+    type: new
+    scope: TBD
+    dependencies: []
+    needs_logical_view: true
+  semantic:
+    responsibility: Экспонирование healthcheck эндпоинта для контейнеров/оркестраторов.
+    public_interfaces:
+    - GET /health
+    interacts_with:
+    - FastAPIApp
+    - DependencyGraph
+- name: MetricsRouter
+  structural:
+    layer: TBD
+    type: new
+    scope: TBD
+    dependencies: []
+    needs_logical_view: true
+  semantic:
+    responsibility: Экспорт Prometheus метрик сервиса.
+    public_interfaces:
+    - GET /metrics
+    interacts_with:
+    - PriorityChatQueue
+    - PrometheusMetrics
+    - RequestLifecycleManager
+    - SQLiteCache
+    - TokenLimitEnforcer
+- name: PriorityChatQueue
+  structural:
+    layer: TBD
+    type: new
+    scope: TBD
+    dependencies: []
+    needs_logical_view: true
+  semantic:
+    responsibility: Очередь с приоритетами и ограничением конкурентности; поддерживает
+      удаление/отмену задач и правила возраста/лимитов.
+    public_interfaces:
+    - submit(task, priority, request_id)
+    - cancel(request_id)
+    - metrics_snapshot()
+    interacts_with:
+    - PriorityQueueRepository
+    - QueueService
+    - RequestLifecycleManager
+    - MetricsRouter
+- name: PriorityQueueRepository
+  structural:
+    layer: TBD
+    type: new
+    scope: TBD
+    dependencies: []
+    needs_logical_view: true
+  semantic:
+    responsibility: Хранилище состояния очереди (queued/inflight) и индексов по request_id
+      для быстрого удаления/отмены.
+    public_interfaces:
+    - enqueue(request)
+    - dequeue_next()
+    - mark_inflight(request_id)
+    - remove(request_id)
+    - get(request_id)
+    interacts_with:
+    - PriorityChatQueue
+    - QueueService
+    - RequestLifecycleManager
+- name: PrometheusMetrics
+  structural:
+    layer: TBD
+    type: new
+    scope: TBD
+    dependencies: []
+    needs_logical_view: true
+  semantic:
+    responsibility: Регистрация и обновление Prometheus метрик (очередь/кэш/транспорт/SOCKS
+      ошибки) для экспорта через /metrics.
+    public_interfaces:
+    - inc_requests_total(labels)
+    - inc_socks_errors_total(labels)
+    - observe_latency(labels, value)
+    interacts_with:
+    - MetricsRouter
+    - PriorityChatQueue
+    - SQLiteCache
+    - TransportHttpClientFactory
+    - SocksDiagnosticsService
+- name: QueueService
+  structural:
+    layer: TBD
+    type: new
+    scope: TBD
+    dependencies: []
+    needs_logical_view: true
+  semantic:
+    responsibility: 'Оркестрация правил очереди: применение приоритетов по умолчанию,
+      age-правил, отмен, и запуск выполнения задач.'
+    public_interfaces:
+    - enqueue_request(request)
+    - cancel_request(request_id, reason)
+    - get_queue_status()
+    interacts_with:
+    - PriorityChatQueue
+    - PriorityQueueRepository
+    - RequestLifecycleManager
+    - TokenLimitEnforcer
+    - ChatProvider
+    - SQLiteCache
+- name: RequestEventBus
+  structural:
+    layer: TBD
+    type: new
+    scope: TBD
+    dependencies: []
+    needs_logical_view: true
+  semantic:
+    responsibility: Внутренний механизм публикации событий очереди и отмен (RequestEnqueued/InProgress/Completed/Cancelled)
+      для логов/метрик/трейсинга.
+    public_interfaces:
+    - publish(event)
+    - subscribe(handler)
+    interacts_with:
+    - RequestLifecycleManager
+    - QueueService
+    - MetricsRouter
+- name: RequestHandler
+  structural:
+    layer: TBD
+    type: new
+    scope: TBD
+    dependencies: []
+    needs_logical_view: true
+  semantic:
+    responsibility: 'Обработка входящих запросов: присвоение request_id/trace_id,
+      применение приоритетов/лимитов, постановка в очередь и реакция на отмены.'
+    public_interfaces:
+    - handle_chat_completion(request)
+    - handle_cancel(request_id)
+    interacts_with:
+    - QueueService
+    - RequestLifecycleManager
+    - TokenLimitEnforcer
+    - SQLiteCache
+    - ChatProvider
+- name: RequestLifecycleManager
+  structural:
+    layer: TBD
+    type: new
+    scope: TBD
+    dependencies: []
+    needs_logical_view: true
+  semantic:
+    responsibility: Управление жизненным циклом запросов и их статусами (accepted/queued/inflight/done/cancelled)
+      и генерация событий.
+    public_interfaces:
+    - accept(request_id, metadata)
+    - mark_queued(request_id)
+    - mark_inflight(request_id)
+    - complete(request_id, result)
+    - cancel(request_id, reason)
+    - get_status(request_id)
+    interacts_with:
+    - QueueService
+    - PriorityChatQueue
+    - RequestEventBus
+    - MetricsRouter
+- name: Settings
+  structural:
+    layer: TBD
+    type: new
+    scope: TBD
+    dependencies: []
+    needs_logical_view: true
+  semantic:
+    responsibility: Централизованная конфигурация сервиса, включая глобальные параметры
+      SOCKS и overrides политики SOCKS на уровне провайдера.
+    public_interfaces:
+    - get_settings()
+    interacts_with:
+    - DependencyGraph
+    - DoctorRouter
+    - FastAPIApp
+    - QueueService
+    - SocksPolicyResolver
+    - StatusRouter
+    - TokenLimitEnforcer
+    - TransportHttpClientFactory
+- name: SettingsRouter
+  structural:
+    layer: TBD
+    type: new
+    scope: TBD
+    dependencies: []
+    needs_logical_view: true
+  semantic:
+    responsibility: HTTP API для чтения текущих настроек рантайма, включая правила
+      приоритетов и лимиты токенов.
+    public_interfaces:
+    - GET /v1/settings
+    interacts_with:
+    - Settings
+    - QueueService
+    - TokenLimitEnforcer
+- name: SocksDiagnosticsService
+  structural:
+    layer: TBD
+    type: new
+    scope: TBD
+    dependencies: []
+    needs_logical_view: true
+  semantic:
+    responsibility: Сбор безопасного представления SOCKS конфигурации и рантайм-статуса;
+      выполнение doctor-checks (tcp_connect/auth/outbound_test) без утечки секретов.
+    public_interfaces:
+    - get_config_view()
+    - get_runtime_status()
+    - run_doctor_checks()
+    interacts_with:
+    - Settings
+    - TransportHttpClientFactory
+    - StatusRouter
+    - DoctorRouter
+    - PrometheusMetrics
+- name: SocksPolicyResolver
+  structural:
+    layer: TBD
+    type: new
+    scope: TBD
+    dependencies: []
+    needs_logical_view: true
+  semantic:
+    responsibility: Резолвинг политики SOCKS per-provider (disable/inherit/force)
+      на основе глобальных настроек и provider overrides; выбор итогового транспорта
+      direct|socks.
+    public_interfaces:
+    - resolve(provider_name)
+    interacts_with:
+    - Settings
+    - TransportHttpClientFactory
+    - ChatProvider
+    - ClientFactory
+- name: SQLiteCache
+  structural:
+    layer: TBD
+    type: new
+    scope: TBD
+    dependencies: []
+    needs_logical_view: true
+  semantic:
+    responsibility: TTL-кэш ответов и inflight-dedup для одинаковых запросов.
+    public_interfaces:
+    - get(key)
+    - set(key, value, ttl)
+    - get_or_set(key, producer)
+    interacts_with:
+    - ChatRouter
+    - QueueService
+    - RequestHandler
+    - MetricsRouter
+- name: StatusRouter
+  structural:
+    layer: TBD
+    type: new
+    scope: TBD
+    dependencies: []
+    needs_logical_view: true
+  semantic:
+    responsibility: HTTP API для чтения агрегированного статуса сервиса, включая безопасное
+      представление конфигурации SOCKS и рантайм-статус.
+    public_interfaces:
+    - GET /status
+    interacts_with:
+    - FastAPIApp
+    - Settings
+    - TransportHttpClientFactory
+    - SocksDiagnosticsService
+    - DependencyGraph
+- name: TokenLimitEnforcer
+  structural:
+    layer: TBD
+    type: new
+    scope: TBD
+    dependencies: []
+    needs_logical_view: true
+  semantic:
+    responsibility: 'Строгое ограничение токенов: валидация лимитов, предотвращение
+      превышения модельных ограничений и нормализация параметров запроса.'
+    public_interfaces:
+    - validate_and_adjust(request)
+    - estimate_tokens(request)
+    - get_limits(provider, model)
+    interacts_with:
+    - Settings
+    - RequestHandler
+    - QueueService
+    - MetricsRouter
+- name: TransportHttpClientFactory
+  structural:
+    layer: TBD
+    type: new
+    scope: TBD
+    dependencies: []
+    needs_logical_view: true
+  semantic:
+    responsibility: Построение и кэширование long-lived httpx клиентов/транспортов
+      (direct и SOCKS) и выдача их по резолвнутой политике; best-effort закрытие на
+      shutdown.
+    public_interfaces:
+    - get_async_client(provider_name)
+    - close()
+    interacts_with:
+    - DependencyGraph
+    - Settings
+    - SocksPolicyResolver
+    - ChatProvider
+    - ClientFactory
+    - SocksDiagnosticsService
+    - PrometheusMetrics
+- name: Wrapper
+  structural:
+    layer: TBD
+    type: new
+    scope: TBD
+    dependencies: []
+    needs_logical_view: true
+  semantic:
+    responsibility: Обёртка, объединяющая очередь и кэш вокруг LLM-клиента/провайдера;
+      обеспечивает инварианты выполнения и предотвращает опасные sync-вызовы.
+    public_interfaces:
+    - ainvoke(input)
+    - agenerate(messages)
+    interacts_with:
+    - ClientFactory
+    - PriorityChatQueue
+    - SQLiteCache
+    - ChatProvider
