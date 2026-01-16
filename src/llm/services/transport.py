@@ -198,21 +198,8 @@ class HttpClientFactory:
                 raise
             self._mark_socks_error(details.code)
             record_socks_error(provider_name, details.reason)
-            if not self._settings.llm_socks_strict and details.allow_fallback:
-                logger.warning(
-                    "SOCKS unavailable, falling back to direct (provider=%s reason=%s)",
-                    provider_name,
-                    details.code,
-                )
-                logger.debug(
-                    "provider=%s transport=direct target=%s",
-                    provider_name,
-                    target_host,
-                )
-                record_transport(provider_name, "direct")
-                return await request_fn("direct")
             logger.error(
-                "SOCKS strict mode enabled, aborting request (provider=%s reason=%s)",
+                "SOCKS request failed; no direct fallback (provider=%s reason=%s)",
                 provider_name,
                 details.code,
             )
