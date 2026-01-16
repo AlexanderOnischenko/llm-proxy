@@ -182,10 +182,7 @@ class HttpClientFactory:
     def note_socks_error(self, provider_name: str, exc: Exception) -> SocksErrorDetails | None:
         details = _classify_socks_error(exc)
         if details is None:
-            details = SocksErrorDetails(
-                code="SOCKS_UNKNOWN_ERROR",
-                reason="unknown",
-            )
+            return None
         self._mark_socks_error(details.code)
         record_socks_error(provider_name, details.reason)
         logger.error(
