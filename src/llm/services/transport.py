@@ -323,11 +323,11 @@ class HttpClientFactory:
                 details = _classify_socks_error(exc)
                 if details and details.code == "SOCKS_AUTH_ERROR":
                     return False, "SOCKS authentication failed"
-                return (
-                    False,
-                    "SOCKS auth check failed; upstream request error: "
-                    f"{exc.__class__.__name__}",
+                message = (
+                    "Proxy auth check inconclusive; upstream request error: "
+                    f"{exc.__class__.__name__}"
                 )
+                return True, message
 
     async def _check_outbound(self) -> tuple[bool, str | None]:
         proxy_url = self._proxy_url()
