@@ -8,6 +8,8 @@ from pydantic import BaseModel, Field
 
 class SocksConfigView(BaseModel):
     enabled: bool
+    required_by_overrides: bool
+    forced_providers: list[str]
     type: str
     endpoint: str
     strict: bool = False

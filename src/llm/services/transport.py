@@ -81,8 +81,11 @@ class HttpClientFactory:
         self._limits = httpx.Limits(max_connections=100, max_keepalive_connections=20)
 
     def socks_config_view(self) -> SocksConfigView:
+        forced = self._forced_providers()
         return SocksConfigView(
             enabled=self._settings.llm_socks_enabled,
+            required_by_overrides=bool(forced),
+            forced_providers=sorted(forced),
             type=self._settings.llm_socks_type,
             endpoint=self._settings.llm_socks_endpoint,
             strict=self._settings.llm_socks_strict,

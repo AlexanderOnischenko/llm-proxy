@@ -140,7 +140,10 @@ class Settings(BaseSettings):
                 raise ValueError(
                     f"Invalid SOCKS override policy {policy!r}; expected inherit|disable|force"
                 )
-            normalized[key.strip().lower()] = policy
+            normalized_key = key.strip().lower()
+            if not normalized_key:
+                raise ValueError("LLM_SOCKS_PROVIDER_OVERRIDES keys cannot be empty")
+            normalized[normalized_key] = policy
         return normalized
 
     @property
