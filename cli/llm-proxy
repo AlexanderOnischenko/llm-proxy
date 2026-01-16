@@ -1001,13 +1001,23 @@ _python_bin() {
 
 fetch_json() {
   local url="$1"
-  local curl_flags="${2:--fsS}"
-  local fail_on_http=0
-  if [[ "$curl_flags" == *"-f"* || "$curl_flags" == *"--fail"* ]]; then
-    fail_on_http=1
+  shift || true
+  local -a curl_flags=()
+  if [[ $# -gt 0 ]]; then
+    curl_flags=("$@")
+  else
+    curl_flags=(-fsS)
   fi
+  local fail_on_http=0
+  local flag
+  for flag in "${curl_flags[@]}"; do
+    if [[ "$flag" == *"-f"* || "$flag" == *"--fail"* ]]; then
+      fail_on_http=1
+      break
+    fi
+  done
   if command -v curl >/dev/null 2>&1; then
-    curl $curl_flags "$url"
+    curl "${curl_flags[@]}" "$url"
     return $?
   fi
 
@@ -1081,9 +1091,53 @@ service_doctor() {
   port="$(service_port "$name")"
   url="http://127.0.0.1:${port}/doctor"
 
-  if ! response="$(fetch_json "$url" "-sS")"; then
-    warn "unable to reach service doctor at $url"
-    return 1
+  if command -v curl >/dev/null 2>&1; then
+    local curl_result http_status body
+    if ! curl_result="$(curl -sS -w '\n%{http_code}' "$url")"; then
+      warn "unable to reach service doctor at $url"
+      return 1
+    fi
+    http_status="${curl_result##*$'\n'}"
+    body="${curl_result%$'\n'*}"
+    response="$body"
+    if ! [[ "$http_status" =~ ^[0-9]{3}$ ]]; then
+      warn "unable to parse service doctor status from $url"
+      printf '%s\n' "$response"
+      return 1
+    fi
+    if ((http_status < 200 || http_status >= 300)); then
+      warn "service doctor at $url returned HTTP $http_status"
+      printf '%s\n' "$response"
+      return 1
+    fi
+  else
+    if ! py="$(_python_bin)"; then
+      warn "python not found; unable to reach service doctor at $url"
+      return 1
+    fi
+    if ! response="$("$py" - "$url" <<'PY'
+import sys
+import urllib.error
+import urllib.request
+
+url = sys.argv[1]
+status = 0
+body = b""
+try:
+    with urllib.request.urlopen(url, timeout=5) as resp:
+        status = resp.getcode() or 0
+        body = resp.read()
+except urllib.error.HTTPError as exc:
+    status = exc.code or 0
+    body = exc.read()
+sys.stdout.write(body.decode("utf-8"))
+sys.exit(0 if 200 <= status < 300 else 1)
+PY
+    )"; then
+      warn "service doctor at $url returned non-success status"
+      printf '%s\n' "$response"
+      return 1
+    fi
   fi
 
   if ! py="$(_python_bin)"; then

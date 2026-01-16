@@ -26,7 +26,7 @@ class OpenAIChatProvider:
         transport_factory: HttpClientFactory,
     ):
         self._transport_factory = transport_factory
-        self._transport = transport_factory.resolve_policy(self.provider_name)
+        self._transport: TransportChoice = transport_factory.resolve_policy(self.provider_name)
         self._clients: dict[TransportChoice, AsyncOpenAI] = {}
         self._base_url = str(settings.llm_api_base)
         self._api_key = settings.llm_api_key
@@ -92,7 +92,11 @@ class OpenAIChatProvider:
                 if self._transport == "socks":
                     details = self._transport_factory.note_socks_error(self.provider_name, exc)
                     if details is not None:
-                        raise SocksProxyError(details.code, str(exc)) from exc
+                        message = (
+                            f"{exc} (transport={self._transport} "
+                            f"endpoint={self._transport_factory.socks_endpoint})"
+                        )
+                        raise SocksProxyError(details.code, message) from exc
                 raise
             if self._transport == "socks":
                 self._transport_factory.note_socks_success()

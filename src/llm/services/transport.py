@@ -21,6 +21,8 @@ logger = get_logger(__name__)
 
 TransportChoice = Literal["direct", "socks"]
 
+# Proxy auth exception names differ across python-socks versions, so we
+# dynamically assemble a tuple that matches what's available.
 _PROXY_AUTH_ERRORS = tuple(
     error
     for error in (
@@ -117,6 +119,10 @@ class HttpClientFactory:
             return SocksRuntimeStatus(status="OK", last_checked_at=self._socks_last_checked)
         return SocksRuntimeStatus(status="ERROR", error="SOCKS_UNCHECKED")
 
+    @property
+    def socks_endpoint(self) -> str:
+        return self._settings.llm_socks_endpoint
+
     def resolve_policy(self, provider_name: str) -> TransportChoice:
         provider_key = provider_name.lower()
         policy = self._settings.llm_socks_provider_overrides.get(provider_key, "inherit")
@@ -178,7 +184,13 @@ class HttpClientFactory:
     def note_socks_error(self, provider_name: str, exc: Exception) -> SocksErrorDetails | None:
         details = _classify_socks_error(exc)
         if details is None:
-            return None
+            if not self._settings.llm_socks_strict:
+                return None
+            details = SocksErrorDetails(
+                code="SOCKS_UNKNOWN_ERROR",
+                reason="unknown",
+                allow_fallback=False,
+            )
         self._mark_socks_error(details.code)
         record_socks_error(provider_name, details.reason)
         logger.error(
@@ -310,7 +322,7 @@ class HttpClientFactory:
                     "Proxy auth check inconclusive; upstream request error: "
                     f"{exc.__class__.__name__}"
                 )
-                return True, message
+                return False, message
 
     async def _check_outbound(self) -> tuple[bool, str | None]:
         proxy_url = self._proxy_url()
