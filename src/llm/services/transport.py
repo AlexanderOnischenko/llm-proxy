@@ -177,7 +177,7 @@ class HttpClientFactory:
         if details is None:
             logger.debug(
                 "Non-proxy error while using SOCKS; propagating unchanged",
-                exc_info=exc,
+                exc_info=True,
             )
             return None
         self._mark_socks_error(details.code)
