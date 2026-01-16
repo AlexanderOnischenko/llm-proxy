@@ -316,7 +316,7 @@ class HttpClientFactory:
                     "Proxy auth check inconclusive; upstream request error: "
                     f"{exc.__class__.__name__}"
                 )
-                return True, message
+                return False, message
 
     async def _check_outbound(self) -> tuple[bool, str | None]:
         proxy_url = self._proxy_url()
