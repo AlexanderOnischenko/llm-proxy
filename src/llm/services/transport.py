@@ -67,9 +67,14 @@ def _classify_socks_error(exc: Exception) -> SocksErrorDetails | None:
         return SocksErrorDetails(code="SOCKS_AUTH_ERROR", reason="auth", allow_fallback=True)
     if isinstance(target, (ProxyConnectionError, ProxyError, httpx.ProxyError, httpx.ConnectError)):
         return SocksErrorDetails(code="SOCKS_CONNECT_ERROR", reason="connect", allow_fallback=True)
-    if isinstance(target, (ProxyTimeoutError, httpx.ConnectTimeout)):
+    if isinstance(
+        target,
+        (ProxyTimeoutError, httpx.ConnectTimeout, httpx.PoolTimeout, httpx.WriteTimeout),
+    ):
         return SocksErrorDetails(code="SOCKS_TIMEOUT", reason="timeout", allow_fallback=True)
     if isinstance(target, httpx.ReadTimeout):
+        # Read timeouts can indicate upstream slowness rather than proxy failure, so
+        # we avoid forcing a fallback that might mask upstream issues.
         return SocksErrorDetails(code="SOCKS_TIMEOUT", reason="timeout", allow_fallback=False)
     return None
 
