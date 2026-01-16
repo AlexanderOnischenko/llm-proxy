@@ -32,6 +32,7 @@ class SocksSettings:
         self.llm_socks_type = "socks5"
         self.llm_socks_host = "127.0.0.1"
         self.llm_socks_port = 1080
+        self.llm_socks_endpoint = "127.0.0.1:1080"
         self.llm_socks_username = "user"
         self.llm_socks_password = "pass"
         self.llm_socks_connect_timeout = 3.0
