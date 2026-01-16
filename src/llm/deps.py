@@ -43,7 +43,7 @@ def build_llm(settings: Settings) -> CachedQueuedChatOpenAI:
     global _llm_instance
     if _llm_instance is None:
         transport_factory = build_http_client_factory(settings)
-        provider_name = OpenAIChatProvider.provider_name
+        provider_name = getattr(OpenAIChatProvider, "provider_name", "openai")
         transport_choice = transport_factory.resolve_policy(provider_name)
         _llm_instance = create_custom_llm(
             settings,
