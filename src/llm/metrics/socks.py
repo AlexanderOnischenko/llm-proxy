@@ -20,6 +20,8 @@ _REQUESTS_TRANSPORT_TOTAL = Counter(
 
 
 def record_transport(provider: str, transport: str) -> None:
+    # Keep the SOCKS-prefixed counter for legacy dashboards while also recording
+    # the unified transport metric used by newer views.
     _SOCKS_REQUESTS_TOTAL.labels(provider=provider, transport=transport).inc()
     _REQUESTS_TRANSPORT_TOTAL.labels(provider=provider, transport=transport).inc()
 

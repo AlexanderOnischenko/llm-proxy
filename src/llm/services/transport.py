@@ -241,7 +241,9 @@ class HttpClientFactory:
             auth_ok, auth_detail = await self._check_auth()
             checks.append(DoctorCheck(name="auth", ok=auth_ok, details=auth_detail))
             if not auth_ok:
-                impact.append("SOCKS authentication failed; SOCKS transport unavailable")
+                impact.append(
+                    "SOCKS authentication check failed; credentials or upstream reachability may be an issue"
+                )
                 return DoctorReport(checks=checks, impact=impact)
 
         outbound_ok, outbound_detail = await self._check_outbound()
@@ -316,12 +318,16 @@ class HttpClientFactory:
         async with httpx.AsyncClient(transport=transport_layer, timeout=timeout) as client:
             try:
                 response = await client.get(str(self._settings.llm_api_base), follow_redirects=True)
-                return True, f"Auth ok (HTTP {response.status_code})"
+                return True, f"Proxy auth ok; upstream responded (HTTP {response.status_code})"
             except Exception as exc:  # noqa: BLE001
                 details = _classify_socks_error(exc)
                 if details and details.code == "SOCKS_AUTH_ERROR":
                     return False, "SOCKS authentication failed"
-                return False, f"SOCKS auth check failed: {exc.__class__.__name__}"
+                return (
+                    False,
+                    "SOCKS auth check failed; upstream request error: "
+                    f"{exc.__class__.__name__}",
+                )
 
     async def _check_outbound(self) -> tuple[bool, str | None]:
         proxy_url = self._proxy_url()
