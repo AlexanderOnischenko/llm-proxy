@@ -92,7 +92,11 @@ class OpenAIChatProvider:
                 if self._transport == "socks":
                     details = self._transport_factory.note_socks_error(self.provider_name, exc)
                     if details is not None:
-                        raise SocksProxyError(details.code, str(exc)) from exc
+                        message = (
+                            f"{exc} (transport={self._transport} "
+                            f"endpoint={self._transport_factory.socks_endpoint})"
+                        )
+                        raise SocksProxyError(details.code, message) from exc
                 raise
             if self._transport == "socks":
                 self._transport_factory.note_socks_success()

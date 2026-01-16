@@ -21,6 +21,8 @@ logger = get_logger(__name__)
 
 TransportChoice = Literal["direct", "socks"]
 
+# Proxy auth exception names differ across python-socks versions, so we
+# dynamically assemble a tuple that matches what's available.
 _PROXY_AUTH_ERRORS = tuple(
     error
     for error in (
@@ -116,6 +118,10 @@ class HttpClientFactory:
         if self._socks_last_checked:
             return SocksRuntimeStatus(status="OK", last_checked_at=self._socks_last_checked)
         return SocksRuntimeStatus(status="ERROR", error="SOCKS_UNCHECKED")
+
+    @property
+    def socks_endpoint(self) -> str:
+        return self._settings.llm_socks_endpoint
 
     def resolve_policy(self, provider_name: str) -> TransportChoice:
         provider_key = provider_name.lower()
