@@ -428,6 +428,7 @@ edit
 edit-compose
 up
 start
+models
 run
 debug
 down
@@ -488,7 +489,7 @@ _llm_proxy_completions() {
   fi
 
   case "${prev}" in
-    use|switch|up|debug|down|status|doctor|delete|edit|edit-compose)
+    use|switch|up|debug|down|status|doctor|models|get-models|list-models|delete|edit|edit-compose)
       local profiles
       profiles="$("${COMP_WORDS[0]}" __complete profiles 2>/dev/null | tr '\n' ' ')"
       COMPREPLY=( $(compgen -W "$profiles" -- "$cur") )
@@ -523,7 +524,7 @@ _llm_proxy() {
       ;;
     target)
       case $line[1] in
-        use|switch|up|debug|down|status|doctor|logs|delete|edit|edit-compose)
+        use|switch|up|debug|down|status|doctor|models|get-models|list-models|logs|delete|edit|edit-compose)
           local -a profiles services
           profiles=($(_call_program profiles "$words[1]" __complete profiles))
           if [[ $line[1] == logs ]]; then
@@ -567,7 +568,7 @@ function __llm_proxy_complete_services
 end
 
 complete -c llm-proxy -n "__fish_use_subcommand" -a "(__llm_proxy_complete_commands)" -d "commands"
-complete -c llm-proxy -n "__fish_seen_subcommand_from use switch up debug down status doctor logs delete edit edit-compose" -a "(__llm_proxy_complete_profiles)"
+complete -c llm-proxy -n "__fish_seen_subcommand_from use switch up debug down status doctor models get-models list-models logs delete edit edit-compose" -a "(__llm_proxy_complete_profiles)"
 complete -c llm-proxy -n "__fish_seen_subcommand_from logs" -a "(__llm_proxy_complete_services)"
 complete -c llm-proxy -n "__fish_seen_subcommand_from completion" -a "bash zsh fish"
 EOF
@@ -1159,6 +1160,252 @@ PY
   fi
 }
 
+service_running() {
+  local name="$1"
+  docker_available || return 1
+  local project_name="${PROG}-${name}"
+  local id
+  id="$(docker ps -q --filter "label=com.docker.compose.project=${project_name}" | head -n1 || true)"
+  [[ -n "$id" ]]
+}
+
+cmd_models() {
+  local name="$1"
+  shift || true
+
+  ensure_profile_prefilled "$name"
+  validate_runtime_env_or_die "$name"
+
+  if ! service_running "$name"; then
+    warn "profile '$name' is not running. Tip: $PROG up $name"
+  fi
+
+  local runtime_env
+  runtime_env="$(profile_runtime_env_path "$name")"
+
+  local want_json=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --json|--raw) want_json=1 ;;
+      -h|--help)
+        cat <<EOF
+Usage:
+  $PROG models [profile] [--json]
+
+Lists available upstream models using the profile's runtime env.
+Respects SOCKS settings from <profile>.llm.env (LLM_SOCKS_*).
+
+Format detection by LLM_API_BASE:
+  - OpenAI-compatible (.../v1, .../api/v1, .../openai/v1): expects .data[].id (GET /models)
+  - Gemini (generativelanguage.googleapis.com/v1beta): expects .models[].name (GET /models?key=...)
+EOF
+        return 0
+        ;;
+      *) die "unknown flag: $1 (use: $PROG models --help)" ;;
+    esac
+    shift
+  done
+
+local api_base
+  api_base="$(envfile_get "$runtime_env" "LLM_API_BASE" 2>/dev/null || true)"
+  [[ -n "$api_base" ]] || die "LLM_API_BASE is not set in $runtime_env"
+
+  local base format
+  base="${api_base%/}"
+  format="openai"
+  if [[ "$base" == *"generativelanguage.googleapis.com"*"/v1beta"* ]]; then
+    format="gemini"
+  fi
+
+  local api_key
+  api_key="$(envfile_get "$runtime_env" "LLM_API_KEY" 2>/dev/null || true)"
+
+  local url url_summary
+  url=""
+  url_summary=""
+  if [[ "$format" == "gemini" ]]; then
+    if [[ -z "$api_key" ]]; then
+      api_key="$(envfile_get "$runtime_env" "GEMINI_API_KEY" 2>/dev/null || true)"
+    fi
+    if [[ -z "$api_key" ]]; then
+      api_key="$(envfile_get "$runtime_env" "LLM_GEMINI_API_KEY" 2>/dev/null || true)"
+    fi
+    [[ -n "$api_key" ]] || die "Gemini requires an API key (set LLM_API_KEY in $runtime_env)"
+
+    if [[ "$base" == */models ]]; then
+      url="$base"
+    else
+      url="${base}/models"
+    fi
+
+    # key passed via query param for Gemini
+    if [[ "$url" == *"?"* ]]; then
+      url="${url}&key=${api_key}"
+    else
+      url="${url}?key=${api_key}"
+    fi
+
+    # Don't leak key in summary output.
+    url_summary="${url%%\?*}?key=***"
+  else
+    [[ -n "$api_key" ]] || die "LLM_API_KEY is not set in $runtime_env"
+    if [[ "$base" == */v1 || "$base" == */api/v1 || "$base" == */openai/v1 ]]; then
+      url="${base}/models"
+    else
+      url="${base}/v1/models"
+    fi
+    url_summary="$url"
+  fi
+
+
+  local socks_enabled socks_type socks_host socks_port socks_user socks_pass
+  socks_enabled="$(envfile_get "$runtime_env" "LLM_SOCKS_ENABLED" 2>/dev/null || true)"
+  socks_type="$(envfile_get "$runtime_env" "LLM_SOCKS_TYPE" 2>/dev/null || true)"
+  socks_host="$(envfile_get "$runtime_env" "LLM_SOCKS_HOST" 2>/dev/null || true)"
+  socks_port="$(envfile_get "$runtime_env" "LLM_SOCKS_PORT" 2>/dev/null || true)"
+  socks_user="$(envfile_get "$runtime_env" "LLM_SOCKS_USERNAME" 2>/dev/null || true)"
+  socks_pass="$(envfile_get "$runtime_env" "LLM_SOCKS_PASSWORD" 2>/dev/null || true)"
+
+  local socks_on="off"
+  local socks_endpoint="-"
+  local socks_host_effective="$socks_host"
+  local socks_port_effective="$socks_port"
+
+  local -a curl_args=(-sS -w $'\n%{http_code}')
+  case "$socks_enabled" in
+    1|true|TRUE|yes|YES|on|ON)
+      socks_on="on"
+      [[ -n "$socks_host_effective" ]] || socks_host_effective="127.0.0.1"
+      [[ -n "$socks_port_effective" ]] || socks_port_effective="1080"
+      # контейнерный host.docker.internal на хосте заменяем на localhost
+      if [[ "$socks_host_effective" == "host.docker.internal" ]]; then
+        socks_host_effective="127.0.0.1"
+      fi
+      case "${socks_type:-socks5}" in
+        socks5|socks5h) curl_args+=(--socks5-hostname "${socks_host_effective}:${socks_port_effective}") ;;
+        socks4|socks4a) curl_args+=(--socks4a "${socks_host_effective}:${socks_port_effective}") ;;
+        *) die "unknown LLM_SOCKS_TYPE=${socks_type} (supported: socks5, socks4)" ;;
+      esac
+      if [[ -n "$socks_user" || -n "$socks_pass" ]]; then
+        curl_args+=(--proxy-user "${socks_user}:${socks_pass}")
+      fi
+      ;;
+  esac
+
+  # Summary in stderr; keep stdout clean for piping.
+  printf '%s: models (profile=%s format=%s socks=%s endpoint=%s url=%s)\n' \
+    "$PROG" "$name" "$format" "$socks_on" "$socks_endpoint" "$url_summary" >&2
+
+  curl_args+=(-H "Accept: application/json")
+  if [[ "$format" == "openai" ]]; then
+    curl_args+=(-H "Authorization: Bearer ${api_key}")
+  fi
+  curl_args+=("$url")
+
+  local result http_status body
+  if ! result="$(curl "${curl_args[@]}")"; then
+    die "failed to fetch models from upstream: $url"
+  fi
+
+  http_status="${result##*$'\n'}"
+  body="${result%$'\n'*}"
+
+  if ! [[ "$http_status" =~ ^[0-9]{3}$ ]]; then
+    warn "unable to parse upstream HTTP status"
+    printf '%s\n' "$body" >&2
+  fi
+
+  if (( http_status < 200 || http_status >= 300 )); then
+    warn "upstream returned HTTP $http_status"
+    printf '%s\n' "$body" >&2
+    return 1
+  fi
+
+  if (( want_json )); then
+    printf '%s\n' "$body"
+    return 0
+  fi
+
+  local py
+  if ! py="$(_python_bin)"; then
+    warn "python not found; printing raw JSON"
+    printf '%s\n' "$body"
+    return 0
+  fi
+
+  if [[ "$format" == "gemini" ]]; then
+    if ! "$py" -c '
+import json, sys
+raw = sys.stdin.read()
+try:
+    data = json.loads(raw)
+except Exception:
+    print("invalid JSON from upstream", file=sys.stderr)
+    raise
+
+err = data.get("error")
+if err:
+    msg = err.get("message") if isinstance(err, dict) else str(err)
+    if msg:
+        print(msg, file=sys.stderr)
+    raise SystemExit(1)
+
+models = data.get("models")
+if not isinstance(models, list):
+    print("unexpected response: no models[]", file=sys.stderr)
+    raise SystemExit(1)
+
+count = 0
+for m in models:
+    if isinstance(m, dict):
+        name = m.get("name")
+        if name:
+            print(name)
+            count += 1
+print(f"models: {count}", file=sys.stderr)
+' <<<"$body"; then
+      warn "failed to parse Gemini models response"
+      printf '%s\n' "$body" >&2
+      return 1
+    fi
+  else
+    if ! "$py" -c '
+import json, sys
+raw = sys.stdin.read()
+try:
+    data = json.loads(raw)
+except Exception:
+    print("invalid JSON from upstream", file=sys.stderr)
+    raise
+
+err = data.get("error")
+if err:
+    msg = err.get("message") if isinstance(err, dict) else str(err)
+    if msg:
+        print(msg, file=sys.stderr)
+    raise SystemExit(1)
+
+items = data.get("data")
+if not isinstance(items, list):
+    print("unexpected response: no data[]", file=sys.stderr)
+    raise SystemExit(1)
+
+count = 0
+for it in items:
+    if isinstance(it, dict):
+        mid = it.get("id")
+        if mid:
+            print(mid)
+            count += 1
+print(f"models: {count}", file=sys.stderr)
+' <<<"$body"; then
+      warn "failed to parse OpenAI models response"
+      printf '%s\n' "$body" >&2
+      return 1
+    fi
+  fi
+}
+
 compose_logs() {
   local name="$1"; shift || true
 
@@ -1293,6 +1540,7 @@ Usage:
   $PROG up [name]            # start active or provided profile (compose up -d --build)
   $PROG debug [name]         # start in debug mode (compose-debug.yaml + debugpy attach)
   $PROG down [name]          # stop active or provided profile (compose down)
+  $PROG models [name]        # list available upstream models
   $PROG status [name]
   $PROG doctor [name]
   $PROG logs [name]
@@ -1568,6 +1816,22 @@ main() {
         name="$(sanitize_profile_name "$name")" || die "invalid profile name (use letters/digits/._-; must not end with .llm)"
       fi
       service_doctor "$name"
+      ;;
+      models|get-models|list-models)
+      local first="${1:-}"
+      local name=""
+      if [[ -n "$first" ]]; then
+        local candidate=""
+        if candidate="$(sanitize_profile_name "$first" 2>/dev/null)" && profile_exists "$candidate"; then
+          name="$candidate"
+          shift || true
+        else
+          name="$(get_active_profile)"; [[ -n "$name" ]] || die "no active profile; use: $PROG use <name>"
+        fi
+      else
+        name="$(get_active_profile)"; [[ -n "$name" ]] || die "no active profile; use: $PROG use <name>"
+      fi
+      cmd_models "$name" "$@"
       ;;
     logs)
       local first="${1:-}"
