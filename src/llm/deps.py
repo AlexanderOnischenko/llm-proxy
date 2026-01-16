@@ -129,4 +129,21 @@ def _close_http_client_factory(factory: HttpClientFactory) -> None:
     if loop and loop.is_running():
         loop.create_task(factory.aclose())
         return
-    asyncio.run(factory.aclose())
+
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and not loop.is_closed():
+        if loop.is_running():
+            loop.create_task(factory.aclose())
+            return
+        loop.run_until_complete(factory.aclose())
+        return
+
+    new_loop = asyncio.new_event_loop()
+    try:
+        new_loop.run_until_complete(factory.aclose())
+    finally:
+        new_loop.close()
