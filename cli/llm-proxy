@@ -1011,7 +1011,7 @@ fetch_json() {
   local fail_on_http=0
   local flag
   for flag in "${curl_flags[@]}"; do
-    if [[ "$flag" == *"-f"* || "$flag" == *"--fail"* ]]; then
+    if [[ "$flag" == "-f" || "$flag" == "--fail" || "$flag" == "--fail-with-body" || "$flag" == "-fsS" || "$flag" == *"-f"* ]]; then
       fail_on_http=1
       break
     fi

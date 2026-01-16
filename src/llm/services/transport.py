@@ -233,13 +233,17 @@ class HttpClientFactory:
             return DoctorReport(checks=checks, impact=impact)
 
         if self._settings.llm_socks_username:
-            auth_ok, auth_detail = await self._check_auth()
+            auth_ok, auth_detail, auth_fatal = await self._check_auth()
             checks.append(DoctorCheck(name="auth", ok=auth_ok, details=auth_detail))
             if not auth_ok:
+                if auth_fatal:
+                    impact.append(
+                        "SOCKS authentication check failed; credentials are likely incorrect"
+                    )
+                    return DoctorReport(checks=checks, impact=impact)
                 impact.append(
-                    "SOCKS authentication check failed; credentials or upstream reachability may be an issue"
+                    "SOCKS authentication check inconclusive; upstream reachability may be an issue"
                 )
-                return DoctorReport(checks=checks, impact=impact)
 
         outbound_ok, outbound_detail = await self._check_outbound()
         checks.append(
@@ -301,7 +305,7 @@ class HttpClientFactory:
         except Exception as exc:  # noqa: BLE001
             return False, f"TCP connect failed: {exc.__class__.__name__}"
 
-    async def _check_auth(self) -> tuple[bool, str | None]:
+    async def _check_auth(self) -> tuple[bool, str | None, bool]:
         proxy_url = self._proxy_url()
         transport_layer = AsyncProxyTransport.from_url(proxy_url)
         timeout = httpx.Timeout(
@@ -313,16 +317,16 @@ class HttpClientFactory:
         async with httpx.AsyncClient(transport=transport_layer, timeout=timeout) as client:
             try:
                 response = await client.get(str(self._settings.llm_api_base), follow_redirects=True)
-                return True, f"Proxy auth ok; upstream responded (HTTP {response.status_code})"
+                return True, f"Proxy auth ok; upstream responded (HTTP {response.status_code})", False
             except Exception as exc:  # noqa: BLE001
                 details = _classify_socks_error(exc)
                 if details and details.code == "SOCKS_AUTH_ERROR":
-                    return False, "SOCKS authentication failed"
+                    return False, "SOCKS authentication failed", True
                 message = (
                     "Proxy auth check inconclusive; upstream request error: "
                     f"{exc.__class__.__name__}"
                 )
-                return False, message
+                return False, message, False
 
     async def _check_outbound(self) -> tuple[bool, str | None]:
         proxy_url = self._proxy_url()
