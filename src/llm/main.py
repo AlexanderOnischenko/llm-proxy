@@ -73,7 +73,6 @@ def create_app() -> FastAPI:
                 )
             else:
                 logger.info("SOCKS proxy disabled")
-            logger.info("SOCKS strict mode: %s", socks_config.strict)
             logger.info("Startup: cache initialized, dependencies warmed")
             yield
         finally:

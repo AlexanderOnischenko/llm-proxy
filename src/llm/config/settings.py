@@ -39,7 +39,6 @@ class Settings(BaseSettings):
     llm_socks_port: int = Field(1080, validation_alias="LLM_SOCKS_PORT")
     llm_socks_username: str | None = Field(None, validation_alias="LLM_SOCKS_USERNAME")
     llm_socks_password: str | None = Field(None, validation_alias="LLM_SOCKS_PASSWORD")
-    llm_socks_strict: bool = Field(False, validation_alias="LLM_SOCKS_STRICT")
     llm_socks_connect_timeout: float = Field(3.0, validation_alias="LLM_SOCKS_CONNECT_TIMEOUT")
     llm_socks_read_timeout: float = Field(30.0, validation_alias="LLM_SOCKS_READ_TIMEOUT")
     llm_socks_provider_overrides: dict[str, str] = Field(

@@ -3,7 +3,7 @@
 Нужно добавить управляемую поддержку исходящих запросов к upstream LLM через SOCKS-proxy (в первую очередь SOCKS5), не внедряя SOCKS-логику в сами провайдеры и не ломая текущую OpenAI-совместимость. Дополнительно требуется прозрачная диагностика (status/doctor) и наблюдаемость (логи/метрики), чтобы было понятно кто (какой провайдер) куда ходит и как (direct vs socks).
 
 ## Users / Actors
-* Оператор/DevOps — включает/настраивает SOCKS, включает strict/fallback, запускает диагностику.
+* Оператор/DevOps — включает/настраивает SOCKS, запускает диагностику.
 * Сервис LLM Proxy — резолвит политику, строит транспорт/клиент, выполняет запросы.
 * ChatProvider implementations (OpenAIChatProvider, GigaChatProvider, будущие) — потребляют готовый HTTP-транспорт, не знают про SOCKS.
 * Разработчик провайдера — добавляет новый provider без прокси-кода.
@@ -11,20 +11,20 @@
 
 ## Use Cases
 * DevOps хочет включить SOCKS5 для всех исходящих запросов, чтобы проксировать трафик из изолированной сети.
-(при этом используется strict-mode, чтобы при недоступности SOCKS запросы падали быстро и предсказуемо).
+(при этом используется строгая политика без runtime fallback, чтобы при недоступности SOCKS запросы падали быстро и предсказуемо).
 * Разработчик хочет добавить нового провайдера, чтобы он автоматически получил поддержку SOCKS без изменений внутри провайдера.
 * SRE хочет увидеть статус SOCKS и проверить соединение/аутентификацию/внешний доступ, чтобы быстро локализовать проблему.
 
 ## Proposed Solution
 ### Affected Components
 * settings (llm.config.settings.Settings)
-    * добавить глобальные параметры SOCKS (enabled/type/endpoint/auth/strict/timeouts)
+    * добавить глобальные параметры SOCKS (enabled/type/endpoint/auth/timeouts)
     * добавить опциональные overrides политики SOCKS на уровне провайдера
 * provider (llm.services.chat_provider)
     * отделить “строительство HTTP-клиента/транспорта” в отдельный слой (transport factory)
     * резолвить socks policy (provider → global), получать готовый httpx.AsyncClient
     * классифицировать ошибки SOCKS отдельно от provider errors
-    * реализовать strict поведение (без изменения контракта /v1/chat/completions)
+    * реализовать строгое поведение без runtime fallback (без изменения контракта /v1/chat/completions)
 * client_factory (llm.services.client.create_custom_llm)
     * при создании LangChain ChatOpenAI передавать готовый HTTP async client (если доступно в интеграции) через http_async_client (и при необходимости http_client для sync). 
 * deps (llm.deps)
@@ -46,7 +46,6 @@
         * enabled: bool
         * type: str (ожидаемо socks5)
         * endpoint: str (host:port)
-        * strict: bool = true
         * connect_timeout_s: float
         * read_timeout_s: float
         * username_set: bool (пароль/логин не возвращать)
@@ -71,7 +70,6 @@ Configuration (ENV)
 * LLM_SOCKS_PORT (int, default 1080)
 * LLM_SOCKS_USERNAME (string, optional)
 * LLM_SOCKS_PASSWORD (string, optional)
-* LLM_SOCKS_STRICT (bool, default false)
 * LLM_SOCKS_CONNECT_TIMEOUT (float seconds, default 3)
 * LLM_SOCKS_READ_TIMEOUT (float seconds, default 30)
 Overrides на уровне провайдера (опционально, расширяемо на будущие провайдеры):
@@ -108,10 +106,8 @@ Public HTTP API
 Логи:
 * Startup:
     * [INFO] SOCKS proxy enabled: socks5://<host>:<port>
-    * [INFO] SOCKS strict mode: <bool>
 * Runtime:
-    * [WARN] SOCKS unavailable, falling back to direct (provider=<name>, reason=<code>)
-    * [ERROR] SOCKS strict mode enabled, aborting request (provider=<name>, reason=<code>)
+    * [ERROR] SOCKS proxy failed, aborting request (provider=<name>, reason=<code>)
 * Request-level debug:
     * [DEBUG] provider=<name> transport=<socks5|direct> target=<upstream_host>
 
@@ -124,7 +120,7 @@ Public HTTP API
 * OpenAI SDK уже допускает инъекцию кастомного HTTP клиента в AsyncOpenAI через параметр http_client (backend по умолчанию — httpx). 
 * Для LangChain ChatOpenAI поддерживается передача http_async_client (и http_client для sync). 
 * SOCKS реализуется как transport-capability (общий слой), а не как ветка логики в ChatProvider.
-* Для strict/fallback требуется корректная классификация ошибок “на уровне SOCKS/соединения”, чтобы:
+* Для строгого режима требуется корректная классификация ошибок “на уровне SOCKS/соединения”, чтобы:
     * не маскировать реальные upstream/provider ошибки,
     * не делать опасных повторов POST после частично выполненного запроса.
 
@@ -132,14 +128,11 @@ Public HTTP API
 1. Backward compatibility: при LLM_SOCKS_ENABLED=false поведение исходящих запросов идентично текущему (direct), без требований к наличию прокси.
 2. Provider-agnostic: реализация ChatProvider не читает SOCKS env/settings напрямую и не содержит SOCKS-ветвлений; провайдер получает готовый HTTP-клиент/transport из factory.
 3. Policy resolution: для каждого provider применяется ровно одна политика disable|inherit|force; значение по умолчанию — inherit.
-4. Strict mode: если итоговая политика для провайдера требует SOCKS (inherit+enabled или force) и LLM_SOCKS_STRICT=true, то при любой ошибке установления SOCKS-канала запрос не должен выполнять direct fallback и должен завершаться ошибкой с кодом SOCKS.
-5. Fallback mode (default): если итоговая политика требует SOCKS и LLM_SOCKS_STRICT=false, то при ошибках SOCKS класса:
-    * SOCKS_CONNECT_ERROR, SOCKS_AUTH_ERROR, SOCKS_TIMEOUTвыполняется ровно одна попытка direct fallback, и в логах фиксируется warning.
-6. Безопасность повторов: fallback разрешён только для ошибок, возникающих до установления соединения/прокси-handshake (connect/auth/connect-timeout). Ошибки чтения ответа/таймаут чтения (read timeout) не триггерят fallback по умолчанию (иначе риск двойного POST).
-7. Коды ошибок как контракт: классы/коды ошибок SOCKS должны быть стабильными и совпадать с именами, используемыми в метриках/логах (например SOCKS_CONNECT_ERROR), чтобы по ним можно было строить алерты и дашборды.
-8. Секреты: username/password никогда не логируются и не возвращаются из /status//doctor; в лучшем случае возвращается флаг username_set.
-9. Ресурсы: HTTP clients (direct/socks) являются long-lived singletons (на процесс) и переиспользуют connection pool; создаются лениво и закрываются best-effort на shutdown.
-10. Наблюдаемость: для каждого запроса фиксируется ровно один transport (direct|socks) в debug-логах, и инкрементируется соответствующая метрика транспорта; при fallback должен инкрементироваться транспорт итогового успешного вызова и отдельно метрика ошибки SOCKS.
+4. Strict-only: если итоговая политика для провайдера требует SOCKS (inherit+enabled или force), то при любой ошибке установления SOCKS-канала запрос завершается ошибкой с кодом SOCKS без runtime fallback.
+5. Коды ошибок как контракт: классы/коды ошибок SOCKS должны быть стабильными и совпадать с именами, используемыми в метриках/логах (например SOCKS_CONNECT_ERROR), чтобы по ним можно было строить алерты и дашборды.
+6. Секреты: username/password никогда не логируются и не возвращаются из /status//doctor; в лучшем случае возвращается флаг username_set.
+7. Ресурсы: HTTP clients (direct/socks) являются long-lived singletons (на процесс) и переиспользуют connection pool; создаются лениво и закрываются best-effort на shutdown.
+8. Наблюдаемость: для каждого запроса фиксируется ровно один transport (direct|socks) в debug-логах, и инкрементируется соответствующая метрика транспорта; дополнительно фиксируется метрика ошибки SOCKS.
 
 ### ADRs
 * ADR: “SOCKS as transport-layer capability”
@@ -161,6 +154,6 @@ Public HTTP API
     * всегда https://api.openai.com (как в черновике),
     * или settings.llm_api_base,
     * или оба (с флагами)?
-3. Требуется ли circuit-breaker/кэширование “SOCKS down” статуса (cooldown), чтобы не множить connect timeouts при массовых запросах в режиме fallback?
+3. Требуется ли circuit-breaker/кэширование “SOCKS down” статуса (cooldown), чтобы не множить connect timeouts при массовых запросах в строгом режиме?
 4. Какой формат overrides удобнее для env/профилей: JSON (LLM_SOCKS_PROVIDER_OVERRIDES) vs отдельные переменные на провайдера?
 5. Должен ли GigaChatProvider получить SOCKS поддержку (если SDK позволяет прокинуть httpx client/transport), или на первом этапе ограничиться OpenAI-совместимыми провайдерами?
