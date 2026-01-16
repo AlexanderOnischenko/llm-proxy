@@ -1062,7 +1062,7 @@ service_status() {
   fi
 
   printf '\nService status:\n'
-  printf '%s' "$response" | "$py" - <<'PY'
+  printf '%s' "$response" | "$py" <(cat <<'PY'
 import json
 import sys
 
@@ -1083,6 +1083,7 @@ if runtime.get("error"):
 if runtime.get("last_checked_at"):
     print(f"  socks.runtime.last_checked_at: {runtime.get('last_checked_at')}")
 PY
+)
 }
 
 service_doctor() {
