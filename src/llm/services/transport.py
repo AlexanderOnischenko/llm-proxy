@@ -7,13 +7,9 @@ from typing import Any, Awaitable, Callable, Literal
 from urllib.parse import quote, urlparse
 
 import httpx
+import python_socks
 from httpx_socks import AsyncProxyTransport, SyncProxyTransport
-from python_socks import (
-    ProxyAuthenticationError,
-    ProxyConnectionError,
-    ProxyError,
-    ProxyTimeoutError,
-)
+from python_socks import ProxyConnectionError, ProxyError, ProxyTimeoutError
 
 from llm.config.settings import Settings
 from llm.logging_config import get_logger
@@ -24,6 +20,15 @@ from llm.models.status import DoctorCheck, DoctorReport, SocksConfigView, SocksR
 logger = get_logger(__name__)
 
 TransportChoice = Literal["direct", "socks"]
+
+_PROXY_AUTH_ERRORS = tuple(
+    error
+    for error in (
+        getattr(python_socks, "ProxyAuthenticationError", None),
+        getattr(python_socks, "ProxyAuthError", None),
+    )
+    if error is not None
+)
 
 
 @dataclass(frozen=True)
@@ -53,7 +58,7 @@ def _unwrap_exception(exc: Exception) -> Exception:
 
 def _classify_socks_error(exc: Exception) -> SocksErrorDetails | None:
     target = _unwrap_exception(exc)
-    if isinstance(target, ProxyAuthenticationError):
+    if _PROXY_AUTH_ERRORS and isinstance(target, _PROXY_AUTH_ERRORS):
         return SocksErrorDetails(code="SOCKS_AUTH_ERROR", reason="auth", allow_fallback=True)
     if isinstance(target, (ProxyConnectionError, ProxyError, httpx.ProxyError, httpx.ConnectError)):
         return SocksErrorDetails(code="SOCKS_CONNECT_ERROR", reason="connect", allow_fallback=True)
