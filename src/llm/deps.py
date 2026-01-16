@@ -1,6 +1,4 @@
 # src/deps.py
-import asyncio
-
 from fastapi import Depends
 
 from llm.config.settings import Settings, get_settings
@@ -74,6 +72,7 @@ def build_chat_provider(settings: Settings) -> ChatProvider:
 def build_http_client_factory(settings: Settings) -> HttpClientFactory:
     global _http_client_factory
     if _http_client_factory is None:
+        # Keep a shared factory so doctor/status can query runtime SOCKS state.
         _http_client_factory = HttpClientFactory(settings)
     return _http_client_factory
 
@@ -115,8 +114,7 @@ def reset_chat_dependencies() -> None:
     if _shared_cache is not None:
         _shared_cache.close()
     _shared_cache = None
-    if _http_client_factory is not None:
-        _close_http_client_factory(_http_client_factory)
+    # Sync reset only clears references; async clients are closed via reset_chat_dependencies_async.
     _http_client_factory = None
 
 
@@ -131,32 +129,3 @@ async def reset_chat_dependencies_async() -> None:
     if _http_client_factory is not None:
         await _http_client_factory.aclose()
     _http_client_factory = None
-
-
-def _close_http_client_factory(factory: HttpClientFactory) -> None:
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
-
-    if loop and loop.is_running():
-        loop.create_task(factory.aclose())
-        return
-
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = None
-
-    if loop and not loop.is_closed():
-        if loop.is_running():
-            loop.create_task(factory.aclose())
-            return
-        loop.run_until_complete(factory.aclose())
-        return
-
-    new_loop = asyncio.new_event_loop()
-    try:
-        new_loop.run_until_complete(factory.aclose())
-    finally:
-        new_loop.close()
