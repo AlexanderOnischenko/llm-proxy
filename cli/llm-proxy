@@ -433,6 +433,7 @@ debug
 down
 stop
 status
+doctor
 logs
 delete
 rm
@@ -487,7 +488,7 @@ _llm_proxy_completions() {
   fi
 
   case "${prev}" in
-    use|switch|up|debug|down|status|delete|edit|edit-compose)
+    use|switch|up|debug|down|status|doctor|delete|edit|edit-compose)
       local profiles
       profiles="$("${COMP_WORDS[0]}" __complete profiles 2>/dev/null | tr '\n' ' ')"
       COMPREPLY=( $(compgen -W "$profiles" -- "$cur") )
@@ -522,7 +523,7 @@ _llm_proxy() {
       ;;
     target)
       case $line[1] in
-        use|switch|up|debug|down|status|logs|delete|edit|edit-compose)
+        use|switch|up|debug|down|status|doctor|logs|delete|edit|edit-compose)
           local -a profiles services
           profiles=($(_call_program profiles "$words[1]" __complete profiles))
           if [[ $line[1] == logs ]]; then
@@ -566,7 +567,7 @@ function __llm_proxy_complete_services
 end
 
 complete -c llm-proxy -n "__fish_use_subcommand" -a "(__llm_proxy_complete_commands)" -d "commands"
-complete -c llm-proxy -n "__fish_seen_subcommand_from use switch up debug down status logs delete edit edit-compose" -a "(__llm_proxy_complete_profiles)"
+complete -c llm-proxy -n "__fish_seen_subcommand_from use switch up debug down status doctor logs delete edit edit-compose" -a "(__llm_proxy_complete_profiles)"
 complete -c llm-proxy -n "__fish_seen_subcommand_from logs" -a "(__llm_proxy_complete_services)"
 complete -c llm-proxy -n "__fish_seen_subcommand_from completion" -a "bash zsh fish"
 EOF
@@ -605,6 +606,18 @@ LLM_TOP_P=1.0
 LLM_MAX_TOKENS=50000
 LLM_VERBOSE=true
 LLM_TIMEOUT=300.0
+
+# SOCKS proxy (optional)
+LLM_SOCKS_ENABLED=false
+LLM_SOCKS_TYPE=socks5
+LLM_SOCKS_HOST=127.0.0.1
+LLM_SOCKS_PORT=1080
+# LLM_SOCKS_USERNAME=
+# LLM_SOCKS_PASSWORD=
+LLM_SOCKS_STRICT=false
+LLM_SOCKS_CONNECT_TIMEOUT=3
+LLM_SOCKS_READ_TIMEOUT=30
+# LLM_SOCKS_PROVIDER_OVERRIDES={"openai":"inherit"}
 
 # Concurrency / queue
 LLM_MAX_CONCURRENT=1
@@ -963,6 +976,188 @@ compose_status() {
   compose_cmd "$name" ps
 }
 
+service_port() {
+  local name="$1"
+  local compose_env port
+  compose_env="$(profile_compose_env_path "$name")"
+  port="$(envfile_get "$compose_env" "LLM_PORT" 2>/dev/null || true)"
+  if [[ -z "$port" ]]; then
+    port="8002"
+  fi
+  printf '%s\n' "$port"
+}
+
+_python_bin() {
+  if command -v python3 >/dev/null 2>&1; then
+    command -v python3
+    return 0
+  fi
+  if command -v python >/dev/null 2>&1; then
+    command -v python
+    return 0
+  fi
+  return 1
+}
+
+fetch_json() {
+  local url="$1"
+  shift || true
+  local -a curl_flags=()
+  if [[ $# -gt 0 ]]; then
+    curl_flags=("$@")
+  else
+    curl_flags=(-fsS)
+  fi
+  local fail_on_http=0
+  local flag
+  for flag in "${curl_flags[@]}"; do
+    if [[ "$flag" == "-f" || "$flag" == "--fail" || "$flag" == "--fail-with-body" || "$flag" == "-fsS" || "$flag" == *"-f"* ]]; then
+      fail_on_http=1
+      break
+    fi
+  done
+  if command -v curl >/dev/null 2>&1; then
+    curl "${curl_flags[@]}" "$url"
+    return $?
+  fi
+
+  local py
+  if ! py="$(_python_bin)"; then
+    return 1
+  fi
+
+  "$py" - "$url" "$fail_on_http" <<'PY'
+import sys
+import urllib.error
+import urllib.request
+
+url = sys.argv[1]
+fail_on_http = sys.argv[2] == "1"
+body = b""
+try:
+    with urllib.request.urlopen(url, timeout=5) as resp:
+        body = resp.read()
+except urllib.error.HTTPError as exc:
+    if fail_on_http:
+        raise
+    body = exc.read()
+sys.stdout.write(body.decode("utf-8"))
+PY
+}
+
+service_status() {
+  local name="$1"
+  local port url response py
+  port="$(service_port "$name")"
+  url="http://127.0.0.1:${port}/status"
+
+  if ! response="$(fetch_json "$url")"; then
+    warn "unable to reach service status at $url"
+    return 1
+  fi
+
+  if ! py="$(_python_bin)"; then
+    warn "python not found; unable to parse /status response"
+    return 1
+  fi
+
+  printf '\nService status:\n'
+  printf '%s' "$response" | "$py" - <<'PY'
+import json
+import sys
+
+data = json.load(sys.stdin)
+socks = data.get("socks", {})
+config = socks.get("config", {})
+runtime = socks.get("runtime", {})
+
+print(f"  environment: {data.get('env')}")
+print(f"  socks.enabled: {config.get('enabled')}")
+print(f"  socks.type: {config.get('type')}")
+print(f"  socks.endpoint: {config.get('endpoint')}")
+print(f"  socks.strict: {config.get('strict')}")
+print(f"  socks.username_set: {config.get('username_set')}")
+print(f"  socks.runtime.status: {runtime.get('status')}")
+if runtime.get("error"):
+    print(f"  socks.runtime.error: {runtime.get('error')}")
+if runtime.get("last_checked_at"):
+    print(f"  socks.runtime.last_checked_at: {runtime.get('last_checked_at')}")
+PY
+}
+
+service_doctor() {
+  local name="$1"
+  local port url response py
+  port="$(service_port "$name")"
+  url="http://127.0.0.1:${port}/doctor"
+
+  if command -v curl >/dev/null 2>&1; then
+    local curl_result http_status body
+    if ! curl_result="$(curl -sS -w '\n%{http_code}' "$url")"; then
+      warn "unable to reach service doctor at $url"
+      return 1
+    fi
+    http_status="${curl_result##*$'\n'}"
+    body="${curl_result%$'\n'*}"
+    response="$body"
+    if ! [[ "$http_status" =~ ^[0-9]{3}$ ]]; then
+      warn "unable to parse service doctor status from $url"
+      printf '%s\n' "$response"
+      return 1
+    fi
+    if ((http_status < 200 || http_status >= 300)); then
+      warn "service doctor at $url returned HTTP $http_status"
+      printf '%s\n' "$response"
+      return 1
+    fi
+  else
+    if ! py="$(_python_bin)"; then
+      warn "python not found; unable to reach service doctor at $url"
+      return 1
+    fi
+    if ! response="$("$py" - "$url" <<'PY'
+import sys
+import urllib.error
+import urllib.request
+
+url = sys.argv[1]
+status = 0
+body = b""
+try:
+    with urllib.request.urlopen(url, timeout=5) as resp:
+        status = resp.getcode() or 0
+        body = resp.read()
+except urllib.error.HTTPError as exc:
+    status = exc.code or 0
+    body = exc.read()
+sys.stdout.write(body.decode("utf-8"))
+sys.exit(0 if 200 <= status < 300 else 1)
+PY
+    )"; then
+      warn "service doctor at $url returned non-success status"
+      printf '%s\n' "$response"
+      return 1
+    fi
+  fi
+
+  if ! py="$(_python_bin)"; then
+    warn "python not found; unable to format /doctor response"
+    printf '%s\n' "$response"
+    return 0
+  fi
+
+  printf '\nService doctor:\n'
+  if ! printf '%s' "$response" | "$py" - <<'PY'; then
+import json
+import sys
+
+data = json.load(sys.stdin)
+print(json.dumps(data, indent=2))
+PY
+    printf '%s\n' "$response"
+  fi
+}
+
 compose_logs() {
   local name="$1"; shift || true
 
@@ -1098,6 +1293,7 @@ Usage:
   $PROG debug [name]         # start in debug mode (compose-debug.yaml + debugpy attach)
   $PROG down [name]          # stop active or provided profile (compose down)
   $PROG status [name]
+  $PROG doctor [name]
   $PROG logs [name]
   $PROG delete <name> [--yes]
 
@@ -1361,6 +1557,16 @@ main() {
         name="$(sanitize_profile_name "$name")" || die "invalid profile name (use letters/digits/._-; must not end with .llm)"
       fi
       compose_status "$name"
+      service_status "$name"
+      ;;
+    doctor)
+      local name="${1:-}"
+      if [[ -z "$name" ]]; then
+        name="$(get_active_profile)"; [[ -n "$name" ]] || die "no active profile; use: $PROG doctor <name>"
+      else
+        name="$(sanitize_profile_name "$name")" || die "invalid profile name (use letters/digits/._-; must not end with .llm)"
+      fi
+      service_doctor "$name"
       ;;
     logs)
       local first="${1:-}"

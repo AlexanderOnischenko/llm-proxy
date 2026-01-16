@@ -1,6 +1,8 @@
 # services/llm/client.py
 from typing import Any, Dict
 
+import httpx
+
 from llm.config.settings import Settings
 from llm.services.cache import SQLiteCache
 from llm.services.wrapper import CachedQueuedChatOpenAI
@@ -9,6 +11,8 @@ from llm.services.wrapper import CachedQueuedChatOpenAI
 def create_custom_llm(
     settings: Settings,
     cache: SQLiteCache | None = None,
+    http_async_client: httpx.AsyncClient | None = None,
+    http_client: httpx.Client | None = None,
     **override_kwargs: Any
 ) -> CachedQueuedChatOpenAI:
     """
@@ -32,6 +36,11 @@ def create_custom_llm(
         "cache_ttl":       settings.llm_cache_ttl,
         "max_concurrent":  max(settings.llm_max_concurrent, priority_total_slots),
     }
+
+    if http_async_client is not None:
+        params["http_async_client"] = http_async_client
+    if http_client is not None:
+        params["http_client"] = http_client
 
     params.update(override_kwargs)
     if cache is not None:

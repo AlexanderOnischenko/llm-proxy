@@ -1,4 +1,5 @@
 # llm/config/settings.py
+import json
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Mapping, cast
@@ -30,6 +31,20 @@ class Settings(BaseSettings):
     llm_max_tokens:    int           = Field(50000,               validation_alias="LLM_MAX_TOKENS")
     llm_verbose:       bool          = Field(True,                validation_alias="LLM_VERBOSE")
     llm_timeout:       float         = Field(300.0, validation_alias="LLM_TIMEOUT")
+
+    # SOCKS proxy settings
+    llm_socks_enabled: bool = Field(False, validation_alias="LLM_SOCKS_ENABLED")
+    llm_socks_type: str = Field("socks5", validation_alias="LLM_SOCKS_TYPE")
+    llm_socks_host: str = Field("127.0.0.1", validation_alias="LLM_SOCKS_HOST")
+    llm_socks_port: int = Field(1080, validation_alias="LLM_SOCKS_PORT")
+    llm_socks_username: str | None = Field(None, validation_alias="LLM_SOCKS_USERNAME")
+    llm_socks_password: str | None = Field(None, validation_alias="LLM_SOCKS_PASSWORD")
+    llm_socks_connect_timeout: float = Field(3.0, validation_alias="LLM_SOCKS_CONNECT_TIMEOUT")
+    llm_socks_read_timeout: float = Field(30.0, validation_alias="LLM_SOCKS_READ_TIMEOUT")
+    llm_socks_provider_overrides: dict[str, str] = Field(
+        default_factory=dict,
+        validation_alias="LLM_SOCKS_PROVIDER_OVERRIDES",
+    )
 
     #  Настройки очередей
     llm_max_concurrent:int           = Field(1,                   validation_alias="LLM_MAX_CONCURRENT")
@@ -86,6 +101,53 @@ class Settings(BaseSettings):
             return None
         normalized = value.strip()
         return normalized or None
+
+    @field_validator("llm_socks_type")
+    @classmethod
+    def _normalize_socks_type(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if not normalized:
+            raise ValueError("LLM_SOCKS_TYPE cannot be empty")
+        return normalized
+
+    @field_validator("llm_socks_provider_overrides", mode="before")
+    @classmethod
+    def _parse_socks_overrides(cls, value: Any) -> dict[str, str]:
+        if value is None or value == "":
+            return {}
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError as exc:
+                raise ValueError("LLM_SOCKS_PROVIDER_OVERRIDES must be valid JSON") from exc
+            if not isinstance(parsed, dict):
+                raise ValueError("LLM_SOCKS_PROVIDER_OVERRIDES must be a JSON object")
+            return parsed
+        if isinstance(value, dict):
+            return value
+        raise ValueError("LLM_SOCKS_PROVIDER_OVERRIDES must be a JSON object")
+
+    @field_validator("llm_socks_provider_overrides")
+    @classmethod
+    def _normalize_socks_overrides(cls, value: dict[str, str]) -> dict[str, str]:
+        normalized: dict[str, str] = {}
+        for key, raw in value.items():
+            if not isinstance(key, str):
+                raise ValueError("LLM_SOCKS_PROVIDER_OVERRIDES keys must be strings")
+            policy = str(raw).strip().lower()
+            if policy not in {"inherit", "disable", "force"}:
+                raise ValueError(
+                    f"Invalid SOCKS override policy {policy!r}; expected inherit|disable|force"
+                )
+            normalized_key = key.strip().lower()
+            if not normalized_key:
+                raise ValueError("LLM_SOCKS_PROVIDER_OVERRIDES keys cannot be empty")
+            normalized[normalized_key] = policy
+        return normalized
+
+    @property
+    def llm_socks_endpoint(self) -> str:
+        return f"{self.llm_socks_host}:{self.llm_socks_port}"
 
     @property
     def llm_priority_limits_map(self) -> dict[str, int]:

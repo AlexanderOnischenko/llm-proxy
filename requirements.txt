@@ -43,6 +43,10 @@ httpx==0.28.1
     #   langgraph-sdk
     #   langsmith
     #   openai
+httpx-socks==0.10.0
+    # via -r requirements.in
+python-socks==2.7.1
+    # via httpx-socks
 idna==3.11
     # via
     #   anyio
