@@ -12,7 +12,6 @@ class SocksConfigView(BaseModel):
     forced_providers: list[str]
     type: str
     endpoint: str
-    strict: bool = False
     connect_timeout_s: float = Field(..., ge=0)
     read_timeout_s: float = Field(..., ge=0)
     username_set: bool

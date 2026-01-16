@@ -60,7 +60,6 @@ def test_deps_pass_same_cache_to_llm_and_provider(tmp_path, monkeypatch):
         llm_socks_port=1080,
         llm_socks_username=None,
         llm_socks_password=None,
-        llm_socks_strict=False,
         llm_socks_connect_timeout=3.0,
         llm_socks_read_timeout=30.0,
         llm_socks_provider_overrides={},

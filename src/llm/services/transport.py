@@ -37,7 +37,6 @@ _PROXY_AUTH_ERRORS = tuple(
 class SocksErrorDetails:
     code: str
     reason: str
-    allow_fallback: bool
 
 
 class SocksProxyError(RuntimeError):
@@ -66,18 +65,18 @@ def _unwrap_exception(exc: Exception) -> Exception:
 def _classify_socks_error(exc: Exception) -> SocksErrorDetails | None:
     target = _unwrap_exception(exc)
     if _PROXY_AUTH_ERRORS and isinstance(target, _PROXY_AUTH_ERRORS):
-        return SocksErrorDetails(code="SOCKS_AUTH_ERROR", reason="auth", allow_fallback=True)
+        return SocksErrorDetails(code="SOCKS_AUTH_ERROR", reason="auth")
     if isinstance(target, (ProxyConnectionError, ProxyError, httpx.ProxyError, httpx.ConnectError)):
-        return SocksErrorDetails(code="SOCKS_CONNECT_ERROR", reason="connect", allow_fallback=True)
+        return SocksErrorDetails(code="SOCKS_CONNECT_ERROR", reason="connect")
     if isinstance(
         target,
         (ProxyTimeoutError, httpx.ConnectTimeout, httpx.PoolTimeout, httpx.WriteTimeout),
     ):
-        return SocksErrorDetails(code="SOCKS_TIMEOUT", reason="timeout", allow_fallback=True)
+        return SocksErrorDetails(code="SOCKS_TIMEOUT", reason="timeout")
     if isinstance(target, httpx.ReadTimeout):
         # Read timeouts can indicate upstream slowness rather than proxy failure, so
         # we avoid forcing a fallback that might mask upstream issues.
-        return SocksErrorDetails(code="SOCKS_TIMEOUT", reason="timeout", allow_fallback=False)
+        return SocksErrorDetails(code="SOCKS_TIMEOUT", reason="timeout")
     return None
 
 
@@ -100,7 +99,6 @@ class HttpClientFactory:
             forced_providers=sorted(forced),
             type=self._settings.llm_socks_type,
             endpoint=self._settings.llm_socks_endpoint,
-            strict=self._settings.llm_socks_strict,
             connect_timeout_s=self._settings.llm_socks_connect_timeout,
             read_timeout_s=self._settings.llm_socks_read_timeout,
             username_set=bool(self._settings.llm_socks_username),
@@ -184,12 +182,9 @@ class HttpClientFactory:
     def note_socks_error(self, provider_name: str, exc: Exception) -> SocksErrorDetails | None:
         details = _classify_socks_error(exc)
         if details is None:
-            if not self._settings.llm_socks_strict:
-                return None
             details = SocksErrorDetails(
                 code="SOCKS_UNKNOWN_ERROR",
                 reason="unknown",
-                allow_fallback=False,
             )
         self._mark_socks_error(details.code)
         record_socks_error(provider_name, details.reason)

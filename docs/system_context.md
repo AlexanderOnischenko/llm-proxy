@@ -6,7 +6,7 @@ LLM Proxy — FastAPI-сервис, предоставляющий OpenAI-сов
 ## Key Scenarios
 - Chat completion: клиент вызывает `POST /v1/chat/completions`, сервис выбирает провайдера и транспорт (direct/SOCKS), применяет очередь/кэш и возвращает ответ.
 - Cache hit / inflight dedup: повторяющиеся запросы получают ответ из TTL-кэша или ожидают inflight-результат без повторного вызова upstream.
-- SOCKS strict / fallback: при включённом SOCKS политика решает использовать SOCKS; при ошибках connect/auth — либо fast-fail (strict), либо единичный fallback в direct (non-strict).
+- SOCKS strict only: при включённом SOCKS политика решает использовать SOCKS; при ошибках connect/auth запрос завершится ошибкой SOCKS без runtime fallback.
 - Diagnostics: оператор/SRE вызывает `GET /status` и `GET /doctor`, чтобы увидеть конфигурацию/рантайм SOCKS и результаты проверок доступности.
 - CLI observability: `llm-proxy status` и `llm-proxy doctor` показывают runtime-состояние (docker compose) и сетевую диагностику через HTTP API сервиса.
 
@@ -30,7 +30,7 @@ LLM Proxy — FastAPI-сервис, предоставляющий OpenAI-сов
 ## Core Entities
 | Entity | Description |
 |--------|-------------|
-| Settings | Единый источник конфигурации сервиса, включая `socks.*` (enabled/type/endpoint/auth/strict/timeouts) и overrides по провайдерам. |
+| Settings | Единый источник конфигурации сервиса, включая `socks.*` (enabled/type/endpoint/auth/timeouts) и overrides по провайдерам. |
 | ProviderName | Ключ провайдера (например `openai`, `gigachat`, `openrouter`), используемый для выбора реализации и политики SOCKS. |
 | SocksPolicy | Результат резолвинга per-provider: `disable` / `inherit` / `force` → итоговый transport `direct` или `socks`. |
 | HttpClient | Long-lived httpx.AsyncClient, созданный фабрикой для `direct` или `socks` транспорта. |
@@ -49,9 +49,7 @@ LLM Proxy — FastAPI-сервис, предоставляющий OpenAI-сов
 4. Transport/HttpClientFactory выдаёт httpx.AsyncClient для `direct` или `socks` (lazy singleton, pool reuse).
 5. Запрос проходит через кэш: вычисляется CacheKey → hit возвращается сразу; miss идёт дальше.
 6. Miss ставится в PriorityChatQueue; выполняется callable, вызывающий ChatProvider с готовым HttpClient.
-7. При SOCKS-ошибках connect/auth/connect-timeout:
-   - strict=true: запрос завершается ошибкой SOCKS без fallback;
-   - strict=false: выполняется ровно один fallback в direct (только до handshake), логируется warning и инкрементируются метрики ошибок.
+7. При SOCKS-ошибках connect/auth/connect-timeout запрос завершается ошибкой SOCKS без runtime fallback.
 8. Успешный ответ сохраняется в кэш и возвращается клиенту.
 9. Метрики фиксируют транспорт (`direct|socks`) на запрос и ошибки SOCKS по причинам; debug-логи содержат `provider` и `transport`.
 10. `GET /status` возвращает агрегированный статус, включая socks config/runtime; `GET /doctor` выполняет проверки (парсинг конфига, tcp_connect, auth при наличии, outbound_test) и возвращает DoctorReport.
@@ -60,9 +58,8 @@ LLM Proxy — FastAPI-сервис, предоставляющий OpenAI-сов
 - Совместимость: при `LLM_SOCKS_ENABLED=false` все исходящие запросы идентичны direct-поведению.
 - Provider-agnostic: ChatProvider не читает SOCKS env/settings и не содержит SOCKS-ветвлений; получает готовый HttpClient от фабрики.
 - Политика per-provider: применяется ровно одна политика `disable|inherit|force` (default=inherit).
-- Strict/fallback: fallback разрешён только для ошибок до установления SOCKS-канала; read-timeout и ошибки чтения ответа не должны автоматически триггерить fallback из-за риска двойного POST.
+- Strict-only: при любой ошибке установления SOCKS-канала запрос завершается ошибкой; runtime fallback не используется.
 - Секреты: username/password не логируются и не возвращаются из `/status`/`/doctor`; допускается только `username_set`.
 - Ресурсы: direct/socks httpx clients — long-lived singletons на процесс, создаются лениво, закрываются best-effort на shutdown.
-- Наблюдаемость: каждый запрос фиксирует ровно один итоговый transport; при fallback учитывается ошибка SOCKS и итоговый транспорт успешного вызова.
+- Наблюдаемость: каждый запрос фиксирует ровно один итоговый transport; дополнительно учитываются ошибки SOCKS по причинам.
 - Рантайм-инвариант: сервис рассчитан на один процесс/воркер для корректности очереди, кэша и метрик.
-

@@ -35,7 +35,6 @@ class DummySettings:
         self.llm_socks_port = 1080
         self.llm_socks_username = None
         self.llm_socks_password = None
-        self.llm_socks_strict = False
         self.llm_socks_connect_timeout = 3.0
         self.llm_socks_read_timeout = 30.0
         self.llm_socks_provider_overrides = {}
