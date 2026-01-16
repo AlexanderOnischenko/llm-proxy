@@ -30,7 +30,6 @@ class OpenAIChatProvider:
         self._clients: dict[TransportChoice, AsyncOpenAI] = {}
         self._base_url = str(settings.llm_api_base)
         self._api_key = settings.llm_api_key
-        self._timeout = settings.llm_timeout
         self._default_model = settings.llm_default_model_name
         self._model_override = settings.llm_model_override
         self._default_temperature = settings.llm_temperature
@@ -54,7 +53,6 @@ class OpenAIChatProvider:
         client = AsyncOpenAI(
             api_key=self._api_key,
             base_url=self._base_url,
-            timeout=self._timeout,
             http_client=http_client,
         )
         self._clients[transport] = client
