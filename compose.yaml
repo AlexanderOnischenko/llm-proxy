@@ -28,6 +28,12 @@ services:
     restart: unless-stopped
     init: true
 
+    networks:
+      llm-shared:
+        aliases:
+          - llm
+      default: {}
+
     healthcheck:
       test:
         [
@@ -39,3 +45,8 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+
+networks:
+  llm-shared:
+    external: true
+    name: llm-shared
