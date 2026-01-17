@@ -1,0 +1,1012 @@
+archgraph_ir:
+  feature: SOCKS Proxy support for Chat Providers
+  homology:
+    claims:
+    - Transport selection (direct vs socks) is resolved per-provider from a versioned policy object; ChatProvider implementations
+      never read SOCKS settings directly.
+    - Every request produces exactly one observable final transport (direct|socks); if non-strict and SOCKS fails pre-handshake,
+      at most one direct fallback is permitted and must be witnessed.
+    - SOCKS strict-mode converts pre-handshake SOCKS failures into a stable SOCKS-class error response without attempting
+      direct fallback.
+    - Diagnostics endpoints (/status, /doctor) provide secret-safe, structured witnesses of SOCKS configuration and runtime
+      reachability.
+    - SOCKS error taxonomy and metrics labels are governed as a controlled contract to enable alerting and dashboards.
+  checkable_invariants:
+  - If resolved transport requires SOCKS and strict=true, then any pre-handshake SOCKS failure yields a SOCKS_* error response
+    and no direct upstream call is executed.
+  - If resolved transport requires SOCKS and strict=false, then for each (request_id, provider_name) there is at most one
+    direct fallback attempt after a SOCKS pre-handshake failure.
+  - Each DEC node has CTRL -> DEC -> OBS witness chain; each SCHED node has lifecycle with terminal states and an OBS witness
+    for terminal outcome.
+  nodes:
+  - id: N-CTRL-01
+    type: CTRL
+    name: SOCKS Global Settings Policy
+    statement: Versioned global policy object derived from Settings (enabled/type/endpoint/auth/strict/timeouts) and authorized
+      for change by Operator/DevOps; secrets are never emitted.
+    owner_role: Operator/DevOps
+    phase: control_plane
+    external_contract: false
+    carrier: ENV/Settings object
+    equivalence_key: settings_snapshot_hash
+    witness: 'OBS-11: startup config snapshot (sanitized) + audit trail of changes'
+  - id: N-CTRL-02
+    type: CTRL
+    name: SOCKS Provider Override Policy
+    statement: Versioned per-provider override map (disable|inherit|force) governing policy resolution for each provider_name.
+    owner_role: Operator/DevOps
+    phase: control_plane
+    external_contract: false
+    carrier: ENV/Settings object
+    equivalence_key: overrides_snapshot_hash
+    witness: 'OBS-09: /status includes effective per-provider overrides summary (no secrets)'
+  - id: N-CTRL-03
+    type: CTRL
+    name: SOCKS Error Code Contract
+    statement: Controlled vocabulary of SOCKS-class error codes and reason labels (e.g., SOCKS_CONNECT_ERROR, SOCKS_AUTH_ERROR,
+      SOCKS_TIMEOUT, SOCKS_READ_TIMEOUT) used consistently in logs/metrics/responses.
+    owner_role: Service Owner
+    phase: control_plane
+    external_contract: false
+    carrier: Code contract / ADR
+    equivalence_key: error_contract_version
+    witness: 'OBS-08: metrics labels and OBS-02: error responses use only contract codes'
+  - id: N-CTRL-04
+    type: CTRL
+    name: Diagnostics Policy
+    statement: Controlled definition of /doctor checks (parse_config, tcp_connect, auth_check, outbound_test) including target
+      URLs and timeouts; changes are authorized and audited.
+    owner_role: Operator/DevOps
+    phase: control_plane
+    external_contract: false
+    carrier: Settings + code
+    equivalence_key: doctor_policy_version
+    witness: 'OBS-10: DoctorReport includes executed checks and timestamps (no secrets)'
+  - id: N-CALL-01
+    type: CALL
+    name: Client Chat Completion Request
+    statement: External client invokes OpenAI-compatible chat completion endpoint.
+    owner_role: External Client
+    phase: request_runtime
+    external_contract: true
+    carrier: HTTP POST /v1/chat/completions
+    equivalence_key: request_id
+  - id: N-CALL-02
+    type: CALL
+    name: Status Query
+    statement: Operator/SRE/CLI requests aggregated service status including SOCKS section.
+    owner_role: SRE/Operator
+    phase: diagnostics_runtime
+    external_contract: true
+    carrier: HTTP GET /status
+    equivalence_key: status_request_id
+  - id: N-CALL-03
+    type: CALL
+    name: Doctor Query
+    statement: Operator/SRE/CLI requests active SOCKS connectivity diagnostics.
+    owner_role: SRE/Operator
+    phase: diagnostics_runtime
+    external_contract: true
+    carrier: HTTP GET /doctor
+    equivalence_key: doctor_request_id
+  - id: N-CALL-04
+    type: CALL
+    name: Service Startup Event
+    statement: Process/application startup triggers initialization and configuration logging.
+    owner_role: Runtime Platform
+    phase: startup
+    external_contract: true
+    carrier: FastAPI startup lifecycle hook
+    equivalence_key: process_instance_id
+  - id: N-CALL-05
+    type: CALL
+    name: Service Shutdown Event
+    statement: Process/application shutdown triggers best-effort client closure.
+    owner_role: Runtime Platform
+    phase: shutdown
+    external_contract: true
+    carrier: FastAPI shutdown lifecycle hook
+    equivalence_key: process_instance_id
+  - id: N-CALL-06
+    type: CALL
+    name: Outbound Upstream LLM Request
+    statement: Boundary-crossing outbound HTTP request to upstream LLM provider using selected transport.
+    owner_role: LLM Proxy Service (applier)
+    phase: request_runtime
+    external_contract: true
+    carrier: HTTP client -> upstream base URL
+    equivalence_key: (request_id, provider_name, attempt)
+  - id: N-CALL-07
+    type: CALL
+    name: Outbound Doctor Test Request
+    statement: Boundary-crossing outbound request executed by /doctor outbound_test to a configured target URL.
+    owner_role: LLM Proxy Service (applier)
+    phase: diagnostics_runtime
+    external_contract: true
+    carrier: HTTP client -> test URL
+    equivalence_key: (doctor_request_id, check_name)
+  - id: N-DEC-01
+    type: DEC
+    name: Resolve SOCKS Policy per Provider
+    statement: Commit to exactly one policy value disable|inherit|force for provider_name and derive required transport direct|socks.
+    owner_role: SocksPolicyResolver
+    phase: request_runtime
+    external_contract: false
+    carrier: SocksPolicyResolver.resolve(provider_name)
+    equivalence_key: provider_name
+    policy_ref: N-CTRL-01
+    witness: 'OBS-04: debug log provider + resolved transport'
+  - id: N-DEC-02
+    type: DEC
+    name: Select HTTP Client Instance
+    statement: Commit to a specific long-lived httpx.AsyncClient instance (direct or socks) returned by TransportHttpClientFactory
+      for the resolved transport.
+    owner_role: TransportHttpClientFactory
+    phase: request_runtime
+    external_contract: false
+    carrier: TransportHttpClientFactory.get_async_client(provider_name)
+    equivalence_key: (provider_name, transport, settings_snapshot_hash)
+    policy_ref: N-CTRL-01
+    witness: 'OBS-04: debug log provider + transport + target host'
+  - id: N-DEC-03
+    type: DEC
+    name: Classify SOCKS Failure and Decide Strict/Fallback
+    statement: Given an exception during SOCKS connect/auth/handshake, classify it to a stable SOCKS_* reason and decide whether
+      to abort (strict) or allow a single direct fallback (non-strict).
+    owner_role: LLM Proxy Service
+    phase: request_runtime
+    external_contract: false
+    carrier: Error classifier in provider service layer
+    equivalence_key: (request_id, provider_name, socks_failure_fingerprint)
+    policy_ref: N-CTRL-03
+    witness: 'OBS-05/OBS-06/OBS-08: warning/error log + socks error metric with reason'
+  - id: N-DEC-04
+    type: DEC
+    name: Deduplicate Fallback Attempt
+    statement: Commit that at most one direct fallback attempt is executed for a given (request_id, provider_name) after a
+      pre-handshake SOCKS failure; subsequent fallback requests become NoOp/AlreadyAttempted.
+    owner_role: LLM Proxy Service
+    phase: request_runtime
+    external_contract: false
+    carrier: In-request guard (attempt counter) tied to request context
+    equivalence_key: (request_id, provider_name)
+    policy_ref: N-CTRL-01
+    witness: 'OBS-05: warning log contains ''fallback_attempt=1'' or ''already_attempted'' correlation'
+  - id: N-SCHED-01
+    type: SCHED
+    name: SOCKS Connect/Handshake Attempt with Timeout
+    statement: Time-bounded attempt to establish SOCKS tunnel (tcp_connect + optional auth + handshake) under connect_timeout;
+      may succeed or fail with classified pre-handshake errors.
+    owner_role: TransportHttpClientFactory (applier)
+    phase: request_runtime
+    external_contract: false
+    carrier: httpx(+httpx-socks) connect path
+    equivalence_key: (request_id, provider_name, transport='socks', attempt)
+    lifecycle:
+      states:
+      - INIT
+      - CONNECTING
+      - AUTHENTICATING
+      - HANDSHAKE
+      - ESTABLISHED
+      - FAILED_CONNECT
+      - FAILED_AUTH
+      - FAILED_TIMEOUT
+      terminal_states:
+      - ESTABLISHED
+      - FAILED_CONNECT
+      - FAILED_AUTH
+      - FAILED_TIMEOUT
+  - id: N-SCHED-02
+    type: SCHED
+    name: Upstream Response Read with Timeout
+    statement: Time-bounded read of upstream response under read_timeout; read-timeout does not trigger fallback by default
+      to prevent double POST effects.
+    owner_role: ChatProvider (applier)
+    phase: request_runtime
+    external_contract: false
+    carrier: httpx response stream read
+    equivalence_key: (request_id, provider_name, attempt)
+    lifecycle:
+      states:
+      - REQUEST_SENT
+      - READING
+      - COMPLETED
+      - READ_TIMEOUT
+      - UPSTREAM_ERROR
+      terminal_states:
+      - COMPLETED
+      - READ_TIMEOUT
+      - UPSTREAM_ERROR
+  - id: N-SCHED-03
+    type: SCHED
+    name: Doctor Checks Runner
+    statement: Sequential, time-bounded execution of doctor checks (parse_config, tcp_connect, auth_check, outbound_test)
+      producing a structured report.
+    owner_role: SocksDiagnosticsService
+    phase: diagnostics_runtime
+    external_contract: false
+    carrier: SocksDiagnosticsService.run_doctor_checks()
+    equivalence_key: doctor_request_id
+    lifecycle:
+      states:
+      - START
+      - PARSE_CONFIG
+      - TCP_CONNECT
+      - AUTH_CHECK
+      - OUTBOUND_TEST
+      - REPORT_READY
+      - REPORT_ERROR
+      terminal_states:
+      - REPORT_READY
+      - REPORT_ERROR
+  - id: N-SCHED-04
+    type: SCHED
+    name: Best-effort Client Closure on Shutdown
+    statement: On shutdown, close long-lived HTTP clients (direct/socks) best-effort; errors do not block shutdown but are
+      witnessed.
+    owner_role: DependencyGraph
+    phase: shutdown
+    external_contract: false
+    carrier: DependencyGraph.shutdown_dependencies()
+    equivalence_key: process_instance_id
+    lifecycle:
+      states:
+      - CLOSING
+      - CLOSED
+      - CLOSE_ERROR_IGNORED
+      terminal_states:
+      - CLOSED
+      - CLOSE_ERROR_IGNORED
+  - id: N-OBS-01
+    type: OBS
+    name: Chat Completion Success Response
+    statement: OpenAI-compatible successful chat completion HTTP response returned to client.
+    owner_role: ChatRouter
+    phase: request_runtime
+    external_contract: false
+    carrier: HTTP 200 response
+    equivalence_key: request_id
+    witness: Response body + headers + request_id correlation
+  - id: N-OBS-02
+    type: OBS
+    name: Chat Completion SOCKS Error Response
+    statement: OpenAI-compatible error response with stable SOCKS_* code when strict aborts or when SOCKS failure is surfaced.
+    owner_role: ChatRouter
+    phase: request_runtime
+    external_contract: false
+    carrier: HTTP 4xx/5xx response
+    equivalence_key: request_id
+    witness: error.code in {SOCKS_*} + correlation ids
+  - id: N-OBS-03
+    type: OBS
+    name: 'Startup Logs: SOCKS Config (Sanitized)'
+    statement: Startup log lines declaring SOCKS enabled endpoint and strict mode without leaking username/password.
+    owner_role: FastAPIApp
+    phase: startup
+    external_contract: false
+    carrier: structured logs
+    equivalence_key: process_instance_id
+    witness: log records with endpoint and strict flag; no secrets
+  - id: N-OBS-04
+    type: OBS
+    name: 'Request Debug Log: Provider Transport Target'
+    statement: 'Per-request debug witness: provider=<name> transport=<socks|direct> target=<upstream_host> exactly once per
+      request.'
+    owner_role: LLM Proxy Service
+    phase: request_runtime
+    external_contract: false
+    carrier: structured logs
+    equivalence_key: request_id
+    witness: debug log line with provider, transport, target, request_id
+  - id: N-OBS-05
+    type: OBS
+    name: Fallback Warning Witness
+    statement: Warn-level log emitted when SOCKS fails pre-handshake and non-strict fallback to direct is executed (includes
+      reason code and provider).
+    owner_role: LLM Proxy Service
+    phase: request_runtime
+    external_contract: false
+    carrier: structured logs
+    equivalence_key: (request_id, provider_name)
+    witness: warn log with reason and fallback_attempt count
+  - id: N-OBS-06
+    type: OBS
+    name: Strict Abort Error Witness
+    statement: Error-level log emitted when strict mode aborts due to SOCKS pre-handshake failure (includes reason code and
+      provider).
+    owner_role: LLM Proxy Service
+    phase: request_runtime
+    external_contract: false
+    carrier: structured logs
+    equivalence_key: (request_id, provider_name)
+    witness: error log with reason and strict=true
+  - id: N-OBS-07
+    type: OBS
+    name: Prometheus Transport Metrics
+    statement: Counters tracking request transports (llm_socks_requests_total and llm_requests_transport_total) labeled by
+      provider and final transport.
+    owner_role: PrometheusMetrics
+    phase: request_runtime
+    external_contract: false
+    carrier: /metrics exposition
+    equivalence_key: (provider, transport)
+    witness: metric samples incremented once per request outcome
+  - id: N-OBS-08
+    type: OBS
+    name: Prometheus SOCKS Error Metrics
+    statement: Counter llm_socks_errors_total labeled by provider and stable reason code; incremented for each classified
+      pre-handshake SOCKS failure.
+    owner_role: PrometheusMetrics
+    phase: request_runtime
+    external_contract: false
+    carrier: /metrics exposition
+    equivalence_key: (provider, reason, request_id)
+    witness: metric samples with reason in contract vocabulary
+  - id: N-OBS-09
+    type: OBS
+    name: Status Response Witness
+    statement: GET /status response includes SocksConfigView and SocksRuntimeStatus (status, error w/o secrets, last_checked_at)
+      for operational visibility.
+    owner_role: StatusRouter
+    phase: diagnostics_runtime
+    external_contract: false
+    carrier: HTTP 200 JSON
+    equivalence_key: status_request_id
+    witness: status JSON payload with socks.config and socks.runtime
+  - id: N-OBS-10
+    type: OBS
+    name: Doctor Report Witness
+    statement: GET /doctor response returns DoctorReport with per-check ok/details and impact summary; no secrets exposed.
+    owner_role: DoctorRouter
+    phase: diagnostics_runtime
+    external_contract: false
+    carrier: HTTP 200 JSON
+    equivalence_key: doctor_request_id
+    witness: doctor JSON payload with checks[] and impact[]
+  - id: N-OBS-11
+    type: OBS
+    name: Config Snapshot Audit Witness
+    statement: Sanitized configuration snapshot (hash + non-secret fields) captured at startup to witness which policy version
+      was applied by this process.
+    owner_role: FastAPIApp
+    phase: startup
+    external_contract: false
+    carrier: logs/metrics label
+    equivalence_key: settings_snapshot_hash
+    witness: snapshot hash and non-secret fields in logs/metrics labels
+  - id: N-OBS-12
+    type: OBS
+    name: NoOp/AlreadyAttempted Fallback Witness
+    statement: 'Witness that a repeated fallback trigger did not cause hidden multi-attempt: emitted as debug/warn with ''already_attempted''
+      and correlated to request_id.'
+    owner_role: LLM Proxy Service
+    phase: request_runtime
+    external_contract: false
+    carrier: structured logs
+    equivalence_key: (request_id, provider_name)
+    witness: log record with already_attempted=true
+  edges:
+  - id: E-001
+    to: N-CTRL-01
+    dimensions:
+    - ctrl
+    - boundary
+    proposition: Startup reads environment/settings and materializes the versioned global SOCKS policy for this process instance.
+    guard: ''
+    witness: N-OBS-11
+    from: N-CALL-04
+  - id: E-002
+    to: N-OBS-03
+    dimensions:
+    - obs
+    - ctrl
+    proposition: The effective SOCKS policy must be witnessed at startup via sanitized logs (endpoint + strict flag) without
+      secrets.
+    guard: no secrets
+    witness: N-OBS-03
+    from: N-CTRL-01
+  - id: E-003
+    to: N-OBS-11
+    dimensions:
+    - obs
+    - ctrl
+    - equiv
+    proposition: A stable settings_snapshot_hash witnesses the exact policy version applied, enabling equivalence across restarts.
+    guard: ''
+    witness: N-OBS-11
+    from: N-CTRL-01
+  - id: E-004
+    to: N-CTRL-02
+    dimensions:
+    - ctrl
+    - boundary
+    proposition: Startup reads provider override configuration and materializes a versioned overrides policy object.
+    guard: ''
+    witness: N-OBS-11
+    from: N-CALL-04
+  - id: E-005
+    to: N-OBS-09
+    dimensions:
+    - obs
+    - ctrl
+    proposition: /status must witness the effective per-provider override map used for policy resolution.
+    guard: no secrets
+    witness: N-OBS-09
+    from: N-CTRL-02
+  - id: E-010
+    to: N-DEC-01
+    dimensions:
+    - call_dec
+    - boundary
+    - equiv
+    proposition: An external chat completion request triggers per-provider SOCKS policy resolution using the request's provider_name.
+    guard: ''
+    witness: N-OBS-04
+    from: N-CALL-01
+  - id: E-011
+    to: N-DEC-01
+    dimensions:
+    - ctrl
+    - call_dec
+    proposition: Global SOCKS settings (enabled/strict/timeouts) govern how the resolver derives required transport for the
+      provider.
+    guard: ''
+    witness: ''
+    from: N-CTRL-01
+  - id: E-012
+    to: N-DEC-01
+    dimensions:
+    - ctrl
+    - call_dec
+    proposition: Provider override policy (disable|inherit|force) governs the resolver's final policy choice for this provider.
+    guard: ''
+    witness: ''
+    from: N-CTRL-02
+  - id: E-013
+    to: N-OBS-04
+    dimensions:
+    - obs
+    - call_dec
+    proposition: The resolved transport decision must be witnessed per request (provider, transport, target host).
+    guard: ''
+    witness: N-OBS-04
+    from: N-DEC-01
+  - id: E-014
+    to: N-DEC-02
+    dimensions:
+    - call_dec
+    - boundary
+    proposition: Once the policy resolves required transport, the factory commits to a specific HTTP client instance for that
+      transport.
+    guard: ''
+    witness: N-OBS-04
+    from: N-DEC-01
+  - id: E-020
+    to: N-SCHED-01
+    dimensions:
+    - sched
+    - call_dec
+    - boundary
+    - equiv
+    proposition: Selecting a SOCKS client implies a time-bounded connect/handshake attempt governed by connect_timeout.
+    guard: transport == socks
+    witness: ''
+    from: N-DEC-02
+  - id: E-021
+    to: N-CALL-06
+    dimensions:
+    - call_dec
+    - sched
+    - boundary
+    - equiv
+    proposition: If SOCKS tunnel establishes, the service performs the outbound upstream LLM HTTP request using the selected
+      transport.
+    guard: terminal_state == ESTABLISHED
+    witness: N-OBS-04
+    from: N-SCHED-01
+  - id: E-022
+    to: N-SCHED-02
+    dimensions:
+    - sched
+    - call_dec
+    - boundary
+    - equiv
+    proposition: After sending the outbound request, the client enters a time-bounded read governed by read_timeout.
+    guard: ''
+    witness: ''
+    from: N-CALL-06
+  - id: E-023
+    to: N-OBS-01
+    dimensions:
+    - obs
+    - sched
+    proposition: A completed read produces a successful chat completion response witness.
+    guard: terminal_state == COMPLETED
+    witness: N-OBS-01
+    from: N-SCHED-02
+  - id: E-024
+    to: N-OBS-02
+    dimensions:
+    - obs
+    - sched
+    - ctrl
+    proposition: Read timeouts or upstream errors produce an error response; read-timeout is not eligible for fallback by
+      default to avoid double POST.
+    guard: terminal_state in {READ_TIMEOUT, UPSTREAM_ERROR}
+    witness: N-OBS-02
+    from: N-SCHED-02
+  - id: E-025
+    to: N-SCHED-01
+    dimensions:
+    - ctrl
+    - sched
+    proposition: connect_timeout and auth fields from settings govern the SOCKS connect/handshake scheduler behavior.
+    guard: ''
+    witness: ''
+    from: N-CTRL-01
+  - id: E-026
+    to: N-SCHED-02
+    dimensions:
+    - ctrl
+    - sched
+    proposition: read_timeout from settings governs upstream response read scheduler behavior.
+    guard: ''
+    witness: ''
+    from: N-CTRL-01
+  - id: E-030
+    to: N-DEC-03
+    dimensions:
+    - call_dec
+    - sched
+    - equiv
+    proposition: Any SOCKS connect/auth/timeout terminal failure triggers classification and strict/fallback decision.
+    guard: terminal_state in {FAILED_CONNECT, FAILED_AUTH, FAILED_TIMEOUT}
+    witness: N-OBS-08
+    from: N-SCHED-01
+  - id: E-031
+    to: N-DEC-03
+    dimensions:
+    - ctrl
+    - call_dec
+    proposition: The controlled SOCKS error code contract governs how exceptions are mapped to stable reason codes.
+    guard: ''
+    witness: ''
+    from: N-CTRL-03
+  - id: E-032
+    to: N-DEC-03
+    dimensions:
+    - ctrl
+    - call_dec
+    proposition: The strict flag in settings governs whether classified SOCKS failures must abort or may fallback.
+    guard: ''
+    witness: ''
+    from: N-CTRL-01
+  - id: E-033
+    to: N-OBS-08
+    dimensions:
+    - obs
+    - ctrl
+    proposition: Every classified SOCKS pre-handshake failure must increment llm_socks_errors_total with the stable reason
+      code.
+    guard: ''
+    witness: N-OBS-08
+    from: N-DEC-03
+  - id: E-034
+    to: N-OBS-06
+    dimensions:
+    - obs
+    - call_dec
+    proposition: In strict mode, the abort decision must be witnessed via an error log with provider and reason code.
+    guard: strict == true
+    witness: N-OBS-06
+    from: N-DEC-03
+  - id: E-035
+    to: N-OBS-02
+    dimensions:
+    - obs
+    - call_dec
+    proposition: In strict mode, the abort decision produces a stable SOCKS_* error response to the client.
+    guard: strict == true
+    witness: N-OBS-02
+    from: N-DEC-03
+  - id: E-040
+    to: N-DEC-04
+    dimensions:
+    - call_dec
+    - equiv
+    proposition: If non-strict allows fallback, a dedup gate must commit whether fallback has already been attempted for this
+      request/provider.
+    guard: strict == false
+    witness: N-OBS-05
+    from: N-DEC-03
+  - id: E-041
+    to: N-OBS-12
+    dimensions:
+    - obs
+    - equiv
+    proposition: If fallback was already attempted, the system must witness NoOp/AlreadyAttempted to prevent hidden multiplicity.
+    guard: already_attempted == true
+    witness: N-OBS-12
+    from: N-DEC-04
+  - id: E-042
+    to: N-OBS-05
+    dimensions:
+    - obs
+    - call_dec
+    - equiv
+    proposition: If fallback is permitted (first attempt), the system must emit a warning witness including provider, reason,
+      and fallback_attempt=1.
+    guard: already_attempted == false
+    witness: N-OBS-05
+    from: N-DEC-04
+  - id: E-043
+    to: N-DEC-02
+    dimensions:
+    - call_dec
+    - boundary
+    - equiv
+    proposition: A permitted fallback re-enters HTTP client selection with transport forced to direct for the same request
+      equivalence key.
+    guard: already_attempted == false
+    witness: N-OBS-04
+    from: N-DEC-04
+  - id: E-044
+    to: N-CALL-06
+    dimensions:
+    - call_dec
+    - boundary
+    - equiv
+    proposition: With direct client selected, the service performs the outbound upstream call (second attempt) as the only
+      allowed fallback.
+    guard: transport == direct AND attempt == 2
+    witness: N-OBS-04
+    from: N-DEC-02
+  - id: E-050
+    to: N-OBS-07
+    dimensions:
+    - obs
+    - equiv
+    proposition: A successful request outcome increments transport counters labeled by provider and the final transport used.
+    guard: ''
+    witness: N-OBS-07
+    from: N-OBS-01
+  - id: E-051
+    to: N-OBS-07
+    dimensions:
+    - obs
+    - equiv
+    proposition: An error outcome still increments request transport counters using the final transport decision recorded
+      for the request.
+    guard: ''
+    witness: N-OBS-07
+    from: N-OBS-02
+  - id: E-060
+    to: N-OBS-09
+    dimensions:
+    - obs
+    - call_dec
+    - boundary
+    proposition: A /status call produces a secret-safe status witness including SocksConfigView and SocksRuntimeStatus.
+    guard: ''
+    witness: N-OBS-09
+    from: N-CALL-02
+  - id: E-061
+    to: N-SCHED-03
+    dimensions:
+    - sched
+    - call_dec
+    - boundary
+    proposition: A /doctor call schedules and runs the ordered set of diagnostic checks with timeouts.
+    guard: ''
+    witness: N-OBS-10
+    from: N-CALL-03
+  - id: E-062
+    to: N-SCHED-03
+    dimensions:
+    - ctrl
+    - sched
+    proposition: Diagnostics policy governs which checks run (and their targets/timeouts).
+    guard: ''
+    witness: ''
+    from: N-CTRL-04
+  - id: E-063
+    to: N-CALL-07
+    dimensions:
+    - sched
+    - call_dec
+    - boundary
+    - equiv
+    proposition: The outbound_test stage performs a boundary-crossing test request to the configured target URL.
+    guard: state == OUTBOUND_TEST
+    witness: ''
+    from: N-SCHED-03
+  - id: E-064
+    to: N-OBS-10
+    dimensions:
+    - obs
+    - sched
+    proposition: Doctor check terminal outcome must be witnessed as a structured DoctorReport response.
+    guard: terminal_state in {REPORT_READY, REPORT_ERROR}
+    witness: N-OBS-10
+    from: N-SCHED-03
+  - id: E-070
+    to: N-SCHED-04
+    dimensions:
+    - sched
+    - boundary
+    proposition: Shutdown event schedules best-effort closure of long-lived HTTP clients and pools.
+    guard: ''
+    witness: ''
+    from: N-CALL-05
+  - id: E-071
+    to: N-OBS-03
+    dimensions:
+    - obs
+    - sched
+    proposition: Shutdown closure outcome should be observable via logs (closed or error ignored).
+    guard: ''
+    witness: N-OBS-03
+    from: N-SCHED-04
+  - id: E-080
+    to: N-CALL-06
+    dimensions:
+    - boundary
+    - call_dec
+    proposition: ChatProvider executes upstream call using the injected HTTP client; SOCKS logic remains outside provider
+      code paths.
+    guard: ''
+    witness: N-OBS-04
+    from: N-DEC-02
+  closure_log:
+  - step: 1
+    operation: B
+    added_nodes:
+    - N-CTRL-03
+    added_edges:
+    - E-031
+    rationale: Feature requires stable SOCKS_* error codes for metrics/logs; materialized as a controlled contract object.
+  - step: 2
+    operation: B
+    added_nodes:
+    - N-DEC-04
+    - N-OBS-12
+    added_edges:
+    - E-040
+    - E-041
+    rationale: Fallback rules require 'at most one' direct attempt; materialized dedup DEC and explicit witness to prevent
+      hidden multiplicity.
+  - step: 3
+    operation: B
+    added_nodes:
+    - N-SCHED-01
+    - N-SCHED-02
+    added_edges:
+    - E-020
+    - E-022
+    - E-030
+    rationale: Timeouts and pre/post-handshake boundaries are time mechanisms; materialized as SCHED nodes with lifecycles
+      and terminal witnesses.
+  - step: 4
+    operation: B
+    added_nodes:
+    - N-OBS-11
+    added_edges:
+    - E-003
+    rationale: CTRL objectness requires versioning/audit; added config snapshot hash witness at startup.
+  frontier:
+    remaining:
+    - N-CALL-01
+    - N-CALL-02
+    - N-CALL-03
+    - N-CALL-04
+    - N-CALL-05
+    - N-CALL-06
+    - N-CALL-07
+    explanation:
+    - External callers (clients/CLI/platform lifecycle) and external networks (SOCKS proxy endpoint, upstream LLM, doctor
+      target URL) are outside this feature slice; they are modeled as CALL nodes with external_contract=true.
+    - Outbound network behavior depends on external availability/auth; this is intentionally left as an external contract
+      and is covered by /doctor and runtime logs/metrics witnesses.
+  projections:
+    boundary_view:
+      nodes:
+      - N-CALL-01
+      - N-CALL-02
+      - N-CALL-03
+      - N-CALL-04
+      - N-CALL-05
+      - N-CALL-06
+      - N-CALL-07
+      - N-DEC-01
+      - N-DEC-02
+      - N-DEC-03
+      - N-DEC-04
+      edges:
+      - E-001
+      - E-004
+      - E-010
+      - E-014
+      - E-020
+      - E-021
+      - E-022
+      - E-043
+      - E-044
+      - E-060
+      - E-061
+      - E-063
+      - E-070
+      - E-080
+    sched_view:
+      nodes:
+      - N-SCHED-01
+      - N-SCHED-02
+      - N-SCHED-03
+      - N-SCHED-04
+      edges:
+      - E-020
+      - E-021
+      - E-022
+      - E-023
+      - E-024
+      - E-025
+      - E-026
+      - E-030
+      - E-061
+      - E-062
+      - E-063
+      - E-064
+      - E-070
+      - E-071
+    dec_view:
+      nodes:
+      - N-DEC-01
+      - N-DEC-02
+      - N-DEC-03
+      - N-DEC-04
+      - N-CTRL-01
+      - N-CTRL-02
+      - N-CTRL-03
+      - N-CTRL-04
+      - N-OBS-02
+      - N-OBS-04
+      - N-OBS-05
+      - N-OBS-06
+      - N-OBS-12
+      edges:
+      - E-001
+      - E-002
+      - E-003
+      - E-004
+      - E-005
+      - E-010
+      - E-011
+      - E-012
+      - E-013
+      - E-014
+      - E-020
+      - E-021
+      - E-022
+      - E-024
+      - E-025
+      - E-026
+      - E-030
+      - E-031
+      - E-032
+      - E-033
+      - E-034
+      - E-035
+      - E-040
+      - E-042
+      - E-043
+      - E-044
+      - E-060
+      - E-061
+      - E-062
+      - E-063
+      - E-080
+    ctrl_view:
+      nodes:
+      - N-CTRL-01
+      - N-CTRL-02
+      - N-CTRL-03
+      - N-CTRL-04
+      - N-OBS-03
+      - N-OBS-09
+      - N-OBS-10
+      - N-OBS-11
+      edges:
+      - E-001
+      - E-002
+      - E-003
+      - E-004
+      - E-005
+      - E-011
+      - E-012
+      - E-024
+      - E-025
+      - E-026
+      - E-031
+      - E-032
+      - E-033
+      - E-062
+    obs_view:
+      nodes:
+      - N-OBS-01
+      - N-OBS-02
+      - N-OBS-03
+      - N-OBS-04
+      - N-OBS-05
+      - N-OBS-06
+      - N-OBS-07
+      - N-OBS-08
+      - N-OBS-09
+      - N-OBS-10
+      - N-OBS-11
+      - N-OBS-12
+      edges:
+      - E-002
+      - E-003
+      - E-005
+      - E-013
+      - E-023
+      - E-024
+      - E-033
+      - E-034
+      - E-035
+      - E-041
+      - E-042
+      - E-050
+      - E-051
+      - E-060
+      - E-064
+      - E-071
+    equivalence_view:
+      nodes:
+      - N-CTRL-01
+      - N-CTRL-02
+      - N-CTRL-03
+      - N-CTRL-04
+      - N-CALL-01
+      - N-CALL-02
+      - N-CALL-03
+      - N-CALL-04
+      - N-CALL-05
+      - N-CALL-06
+      - N-CALL-07
+      - N-DEC-01
+      - N-DEC-02
+      - N-DEC-03
+      - N-DEC-04
+      - N-SCHED-01
+      - N-SCHED-02
+      - N-SCHED-03
+      - N-SCHED-04
+      - N-OBS-01
+      - N-OBS-02
+      - N-OBS-03
+      - N-OBS-04
+      - N-OBS-05
+      - N-OBS-06
+      - N-OBS-07
+      - N-OBS-08
+      - N-OBS-09
+      - N-OBS-10
+      - N-OBS-11
+      - N-OBS-12
+      - N-DEC-04
+      edges:
+      - E-003
+      - E-010
+      - E-020
+      - E-021
+      - E-022
+      - E-030
+      - E-040
+      - E-041
+      - E-042
+      - E-043
+      - E-044
+      - E-050
+      - E-051
+      - E-063

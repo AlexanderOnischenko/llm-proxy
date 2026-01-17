@@ -8,6 +8,7 @@ import pytest
 from llm.models.chat import ChatCompletionRequest, ChatMessage
 from llm.services.cache import SQLiteCache
 from llm.services.chat_provider import OpenAIChatProvider
+from llm.services.transport import HttpClientFactory
 
 
 class DummySettings:
@@ -28,6 +29,15 @@ class DummySettings:
         self.llm_cache_ttl = 0
         self.llm_cache_enabled = True
         self.llm_cache_path_resolved = cache_path
+        self.llm_socks_enabled = False
+        self.llm_socks_type = "socks5"
+        self.llm_socks_host = "127.0.0.1"
+        self.llm_socks_port = 1080
+        self.llm_socks_username = None
+        self.llm_socks_password = None
+        self.llm_socks_connect_timeout = 3.0
+        self.llm_socks_read_timeout = 30.0
+        self.llm_socks_provider_overrides = {}
 
 
 class _Resp:
@@ -45,7 +55,8 @@ async def test_chat_provider_caches_identical_requests(tmp_path, caplog, monkeyp
     cache = SQLiteCache(path=str(tmp_path / "cache.sqlite"), ttl_seconds=0, enabled=True)
     settings = DummySettings(cache_path=cache.path)
 
-    provider = OpenAIChatProvider(cast(Any, settings), cache=cache)
+    transport_factory = HttpClientFactory(cast(Any, settings))
+    provider = OpenAIChatProvider(cast(Any, settings), cache=cache, transport_factory=transport_factory)
 
     # Install async stub for openai call
     calls = {"n": 0}
@@ -55,7 +66,8 @@ async def test_chat_provider_caches_identical_requests(tmp_path, caplog, monkeyp
         return _Resp({"echo": payload})
 
     # provider._client.chat.completions.create
-    monkeypatch.setattr(provider._client.chat.completions, "create", create, raising=False)
+    client = provider._get_client("direct")
+    monkeypatch.setattr(client.chat.completions, "create", create, raising=False)
 
     req = ChatCompletionRequest(
         model=None,
@@ -83,7 +95,8 @@ async def test_chat_provider_caches_identical_requests(tmp_path, caplog, monkeyp
 async def test_chat_provider_cache_key_changes_when_params_change(tmp_path, monkeypatch):
     cache = SQLiteCache(path=str(tmp_path / "cache.sqlite"), ttl_seconds=0, enabled=True)
     settings = DummySettings(cache_path=cache.path)
-    provider = OpenAIChatProvider(cast(Any, settings), cache=cache)
+    transport_factory = HttpClientFactory(cast(Any, settings))
+    provider = OpenAIChatProvider(cast(Any, settings), cache=cache, transport_factory=transport_factory)
 
     calls = {"n": 0}
 
@@ -91,7 +104,8 @@ async def test_chat_provider_cache_key_changes_when_params_change(tmp_path, monk
         calls["n"] += 1
         return _Resp({"ok": True, "payload": payload})
 
-    monkeypatch.setattr(provider._client.chat.completions, "create", create, raising=False)
+    client = provider._get_client("direct")
+    monkeypatch.setattr(client.chat.completions, "create", create, raising=False)
 
     base = {
         "model": None,
@@ -115,7 +129,8 @@ async def test_model_override_respected_when_explicit(tmp_path, monkeypatch):
         cache_path=cache.path,
         llm_model_override="override-model",
     )
-    provider = OpenAIChatProvider(cast(Any, settings), cache=cache)
+    transport_factory = HttpClientFactory(cast(Any, settings))
+    provider = OpenAIChatProvider(cast(Any, settings), cache=cache, transport_factory=transport_factory)
 
     captured_payloads: list[dict[str, Any]] = []
 
@@ -123,7 +138,8 @@ async def test_model_override_respected_when_explicit(tmp_path, monkeypatch):
         captured_payloads.append(payload)
         return _Resp({"ok": True, "payload": payload})
 
-    monkeypatch.setattr(provider._client.chat.completions, "create", create, raising=False)
+    client = provider._get_client("direct")
+    monkeypatch.setattr(client.chat.completions, "create", create, raising=False)
 
     req = ChatCompletionRequest(
         model="sender-model",
@@ -155,7 +171,8 @@ async def test_sender_model_respected_when_no_override(tmp_path, monkeypatch):
         cache_path=cache.path,
         llm_default_model_name="proxy-default",
     )
-    provider = OpenAIChatProvider(cast(Any, settings), cache=cache)
+    transport_factory = HttpClientFactory(cast(Any, settings))
+    provider = OpenAIChatProvider(cast(Any, settings), cache=cache, transport_factory=transport_factory)
 
     captured_payloads: list[dict[str, Any]] = []
 
@@ -163,7 +180,8 @@ async def test_sender_model_respected_when_no_override(tmp_path, monkeypatch):
         captured_payloads.append(payload)
         return _Resp({"ok": True, "payload": payload})
 
-    monkeypatch.setattr(provider._client.chat.completions, "create", create, raising=False)
+    client = provider._get_client("direct")
+    monkeypatch.setattr(client.chat.completions, "create", create, raising=False)
 
     sender_model = ChatCompletionRequest(
         model="sender-model",
