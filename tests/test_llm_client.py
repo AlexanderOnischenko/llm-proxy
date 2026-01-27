@@ -14,7 +14,7 @@ def test_create_custom_llm_respects_global_max_concurrent(monkeypatch):
 
     monkeypatch.setattr(client_module, "CachedQueuedChatOpenAI", DummyClient)
 
-    settings = Settings(
+    settings = Settings.model_construct(
         llm_max_concurrent=3,
         llm_api_base="http://example",
         llm_default_model_name="gpt-test",
