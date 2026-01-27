@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -9,9 +8,10 @@ from typing import Any, Awaitable, Callable, Deque, Dict
 
 from prometheus_client import Counter, Gauge, Histogram
 
+from llm.logging_config import get_logger
 from llm.models.chat import ChatCompletionRequest
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 HISTOGRAM_BUCKETS_SECONDS = [
     0.001,
