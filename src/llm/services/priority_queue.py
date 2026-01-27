@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -9,6 +10,8 @@ from typing import Any, Awaitable, Callable, Deque, Dict
 from prometheus_client import Counter, Gauge, Histogram
 
 from llm.models.chat import ChatCompletionRequest
+
+logger = logging.getLogger(__name__)
 
 HISTOGRAM_BUCKETS_SECONDS = [
     0.001,
@@ -255,8 +258,17 @@ class PriorityChatQueue:
             ).inc()
         finally:
             async with self._lock:
-                self._inflight[item.priority] = max(self._inflight[item.priority] - 1, 0)
-                self._total_inflight = max(self._total_inflight - 1, 0)
+                next_priority_inflight = self._inflight[item.priority] - 1
+                if next_priority_inflight < 0:
+                    logger.warning(
+                        "Priority inflight below zero after decrement: %s",
+                        item.priority,
+                    )
+                self._inflight[item.priority] = max(next_priority_inflight, 0)
+                next_total_inflight = self._total_inflight - 1
+                if next_total_inflight < 0:
+                    logger.warning("Total inflight below zero after decrement.")
+                self._total_inflight = max(next_total_inflight, 0)
                 _INFLIGHT.labels(priority=item.priority).dec()
                 self._schedule_dispatch_locked()
 
