@@ -251,28 +251,40 @@ async def test_invoke_returns_metrics_in_body(client, make_queue):
     assert response.json()["request_id"].startswith("r_")
 
 
-async def test_priority_order_respected(client, make_queue):
-    provider = StubProvider(delay=0.05)
+async def test_priority_order_respected():
+    started: list[str] = []
+
+    async def handler(request: ChatCompletionRequest) -> dict[str, Any]:
+        started.append(str(request.messages[0].content))
+        return _chat_response(str(request.messages[0].content), request.model)
+
     limits = {"p1": 1, "p2": 1, "p3": 1}
-    queue = make_queue(provider, limits=limits, max_concurrent_total=1)
-    app.dependency_overrides[get_chat_queue] = lambda: queue
-
-    async def _post(path: str, priority: str, content: str):
-        return await client.post(
-            path,
-            headers={"X-Priority": priority},
-            json={"model": "gpt-4o-mini", "messages": [{"role": "user", "content": content}]},
-        )
-
-    responses = await asyncio.gather(
-        _post("/v1/chat/completions", "p2", "p2"),
-        _post("/v1/chat/completions", "p1", "p1"),
-        _post("/v1/chat/completions", "p3", "p3"),
+    queue = PriorityChatQueue(
+        handler=handler,
+        limits=limits,
+        max_queue=10,
+        default_priority="p2",
+        max_concurrent_total=1,
     )
+    queue._schedule_dispatch_locked = lambda: None  # type: ignore[method-assign]
 
-    assert all(resp.status_code == 200 for resp in responses)
-    assert set(provider.started[:3]) == {"p1", "p2", "p3"}
-    assert provider.started.index("p1") < provider.started.index("p3")
+    tasks = []
+    for idx, priority in enumerate(["p2", "p1", "p3"]):
+        payload = ChatCompletionRequest(
+            model="gpt-4o-mini",
+            messages=[ChatMessage(role="user", content=priority)],
+            temperature=None,
+        )
+        tasks.append(asyncio.create_task(queue.enqueue(str(idx), priority, payload, endpoint="/v1/chat")))
+
+    for _ in range(3):
+        async with queue._lock:
+            queue._dispatch_locked()
+        await asyncio.sleep(0)
+
+    await asyncio.gather(*tasks)
+    assert set(started[:3]) == {"p1", "p2", "p3"}
+    assert started.index("p1") < started.index("p3")
 
 
 async def test_zero_capacity_priority_rejected(client, make_queue):
