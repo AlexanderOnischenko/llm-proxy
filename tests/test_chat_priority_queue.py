@@ -277,10 +277,26 @@ async def test_priority_order_respected():
         )
         tasks.append(asyncio.create_task(queue.enqueue(str(idx), priority, payload, endpoint="/v1/chat")))
 
+    await asyncio.sleep(0)
+    for _ in range(100):
+        async with queue._lock:
+            queued_len = sum(len(q) for q in queue._queues.values())
+        if queued_len == 3:
+            break
+        await asyncio.sleep(0)
+    else:
+        raise AssertionError("Items were not enqueued")
+
     for _ in range(3):
         async with queue._lock:
             queue._dispatch_locked()
-        await asyncio.sleep(0)
+        for _ in range(1000):
+            async with queue._lock:
+                if queue._total_inflight == 0:
+                    break
+            await asyncio.sleep(0)
+        else:
+            raise AssertionError("Task did not finish")
 
     await asyncio.gather(*tasks)
     assert set(started[:3]) == {"p1", "p2", "p3"}
