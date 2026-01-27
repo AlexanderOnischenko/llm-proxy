@@ -95,6 +95,7 @@ def build_chat_queue(
             limits=settings.llm_priority_limits_map,
             max_queue=settings.llm_queue_max_len,
             default_priority=settings.llm_priority_default,
+            max_concurrent_total=settings.llm_max_concurrent,
         )
     return _chat_queue
 

@@ -15,7 +15,7 @@ from llm.deps import (  # noqa: E402
     reset_chat_dependencies_async,
 )
 from llm.main import app  # noqa: E402
-from llm.models.chat import ChatCompletionRequest  # noqa: E402
+from llm.models.chat import ChatCompletionRequest, ChatMessage  # noqa: E402
 from llm.services.priority_queue import PriorityChatQueue  # noqa: E402
 
 
@@ -98,9 +98,22 @@ async def _cleanup_overrides():
 
 @pytest.fixture
 def make_queue():
-    def _make(provider, max_queue: int = 10, limits: dict[str, int] | None = None, default_priority: str = "p2"):
+    def _make(
+        provider,
+        max_queue: int = 10,
+        limits: dict[str, int] | None = None,
+        default_priority: str = "p2",
+        max_concurrent_total: int | None = None,
+    ):
         queue_limits = limits or {"p1": 1, "p2": 1, "p3": 1}
-        return PriorityChatQueue(provider.complete, queue_limits, max_queue, default_priority=default_priority)
+        total_limit = max_concurrent_total if max_concurrent_total is not None else max(sum(queue_limits.values()), 1)
+        return PriorityChatQueue(
+            provider.complete,
+            queue_limits,
+            max_queue,
+            default_priority=default_priority,
+            max_concurrent_total=total_limit,
+        )
 
     return _make
 
@@ -339,6 +352,97 @@ async def test_zero_max_queue_allows_immediate_dispatch_and_rejects_when_busy(cl
     provider.release()
     completed_first = await first_request
     assert completed_first.status_code == 200
+
+
+async def test_total_inflight_never_exceeds_global_limit():
+    max_total = 3
+    limits = {"p1": 2, "p2": 3, "p3": 1}
+    inflight_lock = asyncio.Lock()
+    gate = asyncio.Event()
+    started = asyncio.Event()
+    inflight = 0
+    peak = 0
+
+    async def handler(request: ChatCompletionRequest) -> dict[str, Any]:
+        nonlocal inflight, peak
+        async with inflight_lock:
+            inflight += 1
+            peak = max(peak, inflight)
+            if inflight >= max_total:
+                started.set()
+        await gate.wait()
+        async with inflight_lock:
+            inflight -= 1
+        return _chat_response(str(request.messages[0].content), request.model)
+
+    queue = PriorityChatQueue(
+        handler=handler,
+        limits=limits,
+        max_queue=20,
+        default_priority="p1",
+        max_concurrent_total=max_total,
+    )
+
+    tasks = []
+    for idx, priority in enumerate(["p1", "p2", "p3", "p2", "p1", "p3", "p2", "p1", "p2", "p3"]):
+        payload = ChatCompletionRequest(
+            model="gpt-4o-mini",
+            messages=[ChatMessage(role="user", content=f"{priority}-{idx}")],
+            temperature=None,
+        )
+        tasks.append(asyncio.create_task(queue.enqueue(str(idx), priority, payload, endpoint="/v1/chat")))
+
+    await asyncio.wait_for(started.wait(), timeout=1)
+    assert peak <= max_total
+
+    gate.set()
+    await asyncio.gather(*tasks)
+    assert peak <= max_total
+
+
+async def test_per_priority_limit_respected_with_global_limit():
+    limits = {"p1": 1, "p2": 2, "p3": 2}
+    inflight_lock = asyncio.Lock()
+    gate = asyncio.Event()
+    started = asyncio.Event()
+    per_priority = {"p1": 0}
+    peak_p1 = 0
+
+    async def handler(request: ChatCompletionRequest) -> dict[str, Any]:
+        nonlocal peak_p1
+        priority = str(request.messages[0].content)
+        async with inflight_lock:
+            per_priority["p1"] += 1
+            peak_p1 = max(peak_p1, per_priority["p1"])
+            started.set()
+        await gate.wait()
+        async with inflight_lock:
+            per_priority["p1"] -= 1
+        return _chat_response(priority, request.model)
+
+    queue = PriorityChatQueue(
+        handler=handler,
+        limits=limits,
+        max_queue=10,
+        default_priority="p1",
+        max_concurrent_total=100,
+    )
+
+    tasks = []
+    for idx in range(3):
+        payload = ChatCompletionRequest(
+            model="gpt-4o-mini",
+            messages=[ChatMessage(role="user", content="p1")],
+            temperature=None,
+        )
+        tasks.append(asyncio.create_task(queue.enqueue(str(idx), "p1", payload, endpoint="/v1/chat")))
+
+    await asyncio.wait_for(started.wait(), timeout=1)
+    assert peak_p1 <= 1
+
+    gate.set()
+    await asyncio.gather(*tasks)
+    assert peak_p1 <= 1
 
 
 async def test_metrics_endpoint_returns_200(client, make_queue):
