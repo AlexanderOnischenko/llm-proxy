@@ -254,7 +254,7 @@ async def test_invoke_returns_metrics_in_body(client, make_queue):
 async def test_priority_order_respected(client, make_queue):
     provider = StubProvider(delay=0.05)
     limits = {"p1": 1, "p2": 1, "p3": 1}
-    queue = make_queue(provider, limits=limits)
+    queue = make_queue(provider, limits=limits, max_concurrent_total=1)
     app.dependency_overrides[get_chat_queue] = lambda: queue
 
     async def _post(path: str, priority: str, content: str):
