@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
+from llm.config.settings import Settings
 
 
 def test_create_custom_llm_respects_global_max_concurrent(monkeypatch):
@@ -14,12 +14,10 @@ def test_create_custom_llm_respects_global_max_concurrent(monkeypatch):
 
     monkeypatch.setattr(client_module, "CachedQueuedChatOpenAI", DummyClient)
 
-    settings = SimpleNamespace(
-        llm_priority_total_slots=6,
+    settings = Settings(
         llm_max_concurrent=3,
         llm_api_base="http://example",
         llm_default_model_name="gpt-test",
-        llm_model_override=None,
         llm_temperature=0.0,
         llm_api_key="x",
         llm_verbose=False,
