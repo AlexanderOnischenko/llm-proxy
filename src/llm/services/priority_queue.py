@@ -8,7 +8,10 @@ from typing import Any, Awaitable, Callable, Deque, Dict
 
 from prometheus_client import Counter, Gauge, Histogram
 
+from llm.logging_config import get_logger
 from llm.models.chat import ChatCompletionRequest
+
+logger = get_logger(__name__)
 
 HISTOGRAM_BUCKETS_SECONDS = [
     0.001,
@@ -101,10 +104,14 @@ class PriorityChatQueue:
         limits: Dict[str, int],
         max_queue: int,
         default_priority: str,
+        max_concurrent_total: int,
     ):
         self._handler = handler
         self._limits = {k: max(v, 0) for k, v in limits.items()}
         self._max_queue = max_queue
+        if max_concurrent_total < 1:
+            raise ValueError("max_concurrent_total must be >= 1")
+        self._max_total = max_concurrent_total
         self._lock = asyncio.Lock()
         self._dispatch_scheduled = False
         self._priorities: list[str] = [pr for pr, slots in self._limits.items() if slots > 0]
@@ -112,6 +119,7 @@ class PriorityChatQueue:
             raise ValueError("At least one priority must have capacity > 0")
         self._queues: Dict[str, Deque[QueuedChatRequest]] = {pr: deque() for pr in self._priorities}
         self._inflight: Dict[str, int] = {pr: 0 for pr in self._priorities}
+        self._total_inflight = 0
         self._default_priority = default_priority if default_priority in self._priorities else self._priorities[0]
         self._queue_gauge = _QUEUE_LENGTH
 
@@ -150,7 +158,7 @@ class PriorityChatQueue:
 
         async with self._lock:
             if self._max_queue == 0:
-                if self._inflight[priority] >= self._limits[priority]:
+                if self._total_inflight >= self._max_total or self._inflight[priority] >= self._limits[priority]:
                     _REQUESTS_TOTAL.labels(
                         endpoint=endpoint,
                         priority=priority,
@@ -160,6 +168,7 @@ class PriorityChatQueue:
                     _QUEUE_OVERFLOW.labels(priority=priority).inc()
                     raise QueueOverflowError("Queue capacity exceeded")
                 self._inflight[priority] += 1
+                self._total_inflight += 1
                 _INFLIGHT.labels(priority=priority).inc()
                 dispatch_immediately = True
             else:
@@ -192,6 +201,7 @@ class PriorityChatQueue:
             queued_item = self._queues[next_priority].popleft()
             self._queue_gauge.labels(priority=queued_item.priority).dec()
             self._inflight[next_priority] += 1
+            self._total_inflight += 1
             _INFLIGHT.labels(priority=queued_item.priority).inc()
             asyncio.create_task(self._execute(queued_item))
 
@@ -208,6 +218,8 @@ class PriorityChatQueue:
             self._dispatch_locked()
 
     def _next_priority_locked(self) -> str | None:
+        if self._total_inflight >= self._max_total:
+            return None
         for candidate in self._priorities:
             limit = self._limits[candidate]
             if limit > 0 and self._inflight[candidate] < limit and self._queues[candidate]:
@@ -246,7 +258,17 @@ class PriorityChatQueue:
             ).inc()
         finally:
             async with self._lock:
-                self._inflight[item.priority] = max(self._inflight[item.priority] - 1, 0)
+                next_priority_inflight = self._inflight[item.priority] - 1
+                if next_priority_inflight < 0:
+                    logger.warning(
+                        "Priority inflight below zero after decrement: %s",
+                        item.priority,
+                    )
+                self._inflight[item.priority] = max(next_priority_inflight, 0)
+                next_total_inflight = self._total_inflight - 1
+                if next_total_inflight < 0:
+                    logger.warning("Total inflight below zero after decrement.")
+                self._total_inflight = max(next_total_inflight, 0)
                 _INFLIGHT.labels(priority=item.priority).dec()
                 self._schedule_dispatch_locked()
 

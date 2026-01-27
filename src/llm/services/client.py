@@ -19,7 +19,6 @@ def create_custom_llm(
     Создаёт экземпляр CachedQueuedChatOpenAI на основании переданных Settings
     и любых override_kwargs.
     """
-    priority_total_slots = max(settings.llm_priority_total_slots, 1)
     selected_model = settings.llm_model_override or settings.llm_default_model_name
     params: Dict[str, Any] = {
         # ChatOpenAI параметры
@@ -34,7 +33,7 @@ def create_custom_llm(
         "cache_enabled":   settings.llm_cache_enabled,
         "cache_path":      settings.llm_cache_path,
         "cache_ttl":       settings.llm_cache_ttl,
-        "max_concurrent":  max(settings.llm_max_concurrent, priority_total_slots),
+        "max_concurrent":  settings.llm_max_concurrent,
     }
 
     if http_async_client is not None:
