@@ -1,13 +1,14 @@
 # llm-proxy (Docker-first)
 
-`llm-proxy` — LLM proxy-сервис с очередью, приоритетами и кэшированием, рассчитанный **исключительно на запуск в Docker**.
-Управление окружениями и профилями осуществляется через CLI `llm-proxy`, который работает поверх `docker compose`.
+`llm-proxy` is an LLM proxy service with queueing, priorities, and caching, designed **exclusively to run in Docker**.
+Environments and profiles are managed through the `llm-proxy` CLI, which operates on top of `docker compose`.
 
-Проект предназначен для:
-- проксирования OpenAI-compatible LLM API,
-- ограничения и балансировки нагрузки,
-- изоляции конфигураций через профили,
-- использования как shared LLM backend.
+The project is designed for:
+
+* proxying OpenAI-compatible LLM APIs,
+* limiting and balancing load,
+* isolating configurations through profiles,
+* use as a shared LLM backend.
 
 ---
 
@@ -19,20 +20,22 @@
 ./cli/llm-proxy logs
 ```
 
-По умолчанию сервис будет доступен на:
-```
+By default, the service will be available at:
+
+```text
 http://localhost:8002
 ```
 
 ---
 
-## Требования
+## Requirements
 
-- Docker
-- Docker Compose v2 (`docker compose ...`)
-- bash (Linux / macOS)
+* Docker
+* Docker Compose v2 (`docker compose ...`)
+* bash (Linux / macOS)
 
-Проверка:
+Check your installation:
+
 ```bash
 docker --version
 docker compose version
@@ -40,49 +43,49 @@ docker compose version
 
 ---
 
-## Архитектурные принципы (важно)
+## Architectural Principles (Important)
 
-- ❗ **Только single-worker**
-- ❌ Gunicorn не поддерживается
-- ❌ Multiprocess Prometheus не поддерживается
-- ❌ WEB_CONCURRENCY / UVICORN_WORKERS > 1 запрещены
+* ❗ **Single-worker only**
+* ❌ Gunicorn is not supported
+* ❌ Multiprocess Prometheus is not supported
+* ❌ `WEB_CONCURRENCY` / `UVICORN_WORKERS > 1` are prohibited
 
-Эти ограничения проверяются на старте контейнера.
-Если они нарушены — контейнер завершится с ошибкой.
+These constraints are validated when the container starts.
+If any of them are violated, the container exits with an error.
 
 ---
 
-## Быстрый старт
+## Quick Start
 
-### 1. Инициализация профиля
+### 1. Initialize a Profile
 
 ```bash
 ./cli/llm-proxy init default
 ```
 
-Будет создан профиль `default`, включающий:
+This creates a `default` profile containing:
 
-- `<profile>.env` — переменные **docker compose**
-- `<profile>.llm.env` — **runtime-конфигурация приложения**
-- bind-mount директории (кэш, логи, дампы)
+* `<profile>.env` — **docker compose** environment variables
+* `<profile>.llm.env` — **application runtime configuration**
+* bind-mount directories for cache, logs, and crash dumps
 
-Файлы профиля открываются в редакторе автоматически.
+The profile files are automatically opened in your editor.
 
 ---
 
-### 2. Запуск
+### 2. Start
 
 ```bash
 ./cli/llm-proxy up
 ```
 
-### 3. Логи
+### 3. View Logs
 
 ```bash
 ./cli/llm-proxy logs
 ```
 
-### 4. Остановка
+### 4. Stop
 
 ```bash
 ./cli/llm-proxy down
@@ -92,21 +95,21 @@ docker compose version
 
 ## CLI
 
-### Основные команды
+### Main Commands
 
 ```bash
-llm-proxy init <name>      # создать профиль
-llm-proxy list             # список профилей
-llm-proxy use <name>       # сделать профиль активным
-llm-proxy active           # показать активный профиль
-llm-proxy up [name]        # запустить
-llm-proxy down             # остановить
-llm-proxy logs             # логи
-llm-proxy status           # статус контейнеров
-llm-proxy delete <name>    # удалить профиль и данные
+llm-proxy init <name>      # create a profile
+llm-proxy list             # list profiles
+llm-proxy use <name>       # make a profile active
+llm-proxy active           # show the active profile
+llm-proxy up [name]        # start the service
+llm-proxy down             # stop the service
+llm-proxy logs             # show logs
+llm-proxy status           # show container status
+llm-proxy delete <name>    # delete a profile and its data
 ```
 
-### Редактирование конфигурации
+### Editing Configuration
 
 ```bash
 llm-proxy edit             # runtime env
@@ -115,30 +118,32 @@ llm-proxy edit-compose     # compose env
 
 ---
 
-## Где хранятся профили
+## Profile Storage
 
-Используются XDG-пути (или legacy `~/.llm-proxy`, если уже существует):
+XDG paths are used by default, with legacy `~/.llm-proxy` paths supported if they already exist.
 
-### Конфигурация
-```
+### Configuration
+
+```text
 ~/.config/llm-proxy/profiles/
   ├── default.env
   ├── default.llm.env
   └── staging.env
 ```
 
-### Данные профилей (bind mounts)
-```
+### Profile Data (Bind Mounts)
+
+```text
 ~/.cache/llm-proxy/profiles/<profile>/
 ~/.local/share/llm-proxy/logs/<profile>/
 ~/.local/share/llm-proxy/profiles/<profile>/crash_dumps/
 ```
 
-При `llm-proxy delete <profile>` все эти директории удаляются.
+Running `llm-proxy delete <profile>` removes all of these directories.
 
 ---
 
-## Makefile (если работаете из репозитория)
+## Makefile (When Working from the Repository)
 
 ### CLI
 
@@ -148,7 +153,7 @@ make cli-reinstall
 make cli-uninstall
 ```
 
-### Управление сервисом
+### Service Management
 
 ```bash
 make up PROFILE=default
@@ -157,7 +162,7 @@ make logs PROFILE=default
 make status PROFILE=default
 ```
 
-### Разработка
+### Development
 
 ```bash
 make lint
@@ -167,7 +172,7 @@ make help
 
 ---
 
-## Runtime конфигурация (`<profile>.llm.env`)
+## Runtime Configuration (`<profile>.llm.env`)
 
 ### Upstream LLM
 
@@ -182,18 +187,19 @@ LLM_TEMPERATURE=0.7
 LLM_TIMEOUT=300
 ```
 
-Поддерживается любой OpenAI-compatible API.
+Any OpenAI-compatible API is supported.
 
 ---
 
-## Очередь и приоритеты
+## Queue and Priorities
 
-Поддерживаются приоритеты:
-- `p1` — высокий
-- `p2` — default
-- `p3` — background
+The following priorities are supported:
 
-### Базовые настройки
+* `p1` — high priority
+* `p2` — default
+* `p3` — background
+
+### Basic Settings
 
 ```env
 LLM_MAX_CONCURRENT=3
@@ -201,13 +207,13 @@ LLM_PRIORITY_DEFAULT=p2
 LLM_QUEUE_MAX_LEN=100
 ```
 
-### Лимиты слотов (рекомендуется)
+### Slot Limits (Recommended)
 
 ```env
 LLM_PRIORITY_SLOTS={"p1":2,"p2":1,"p3":1}
 ```
 
-### Legacy-совместимость
+### Legacy Compatibility
 
 ```env
 LLM_PRIORITY_SLOTS_P1=2
@@ -215,77 +221,78 @@ LLM_PRIORITY_SLOTS_P2=1
 LLM_PRIORITY_SLOTS_P3=1
 ```
 
-Если `LLM_PRIORITY_SLOTS` задан — legacy-поля игнорируются.
+If `LLM_PRIORITY_SLOTS` is set, the legacy fields are ignored.
 
 ---
 
-## Кэширование
+## Caching
 
-Используется **единый SQLite-кэш** для всех chat endpoint'ов.
+A **single shared SQLite cache** is used across all chat endpoints.
 
-### Настройки
+### Settings
 
 ```env
 LLM_CACHE_ENABLED=true
 LLM_CACHE_TTL=600000
 ```
 
-### Пути
+### Paths
 
 ```env
 LLM_CACHE_PATH=/tmp/llm_cache.db
 ```
 
-или legacy:
+Or, for legacy configuration:
 
 ```env
 CACHE_CONTAINER_DIR=/cache
 LLM_CACHE_FILE=llm_cache.sqlite
 ```
 
-Правило выбора:
-1. Если задан `LLM_CACHE_PATH`
-2. Иначе → `CACHE_CONTAINER_DIR/LLM_CACHE_FILE`
+Path resolution order:
+
+1. Use `LLM_CACHE_PATH` if it is set.
+2. Otherwise use `CACHE_CONTAINER_DIR/LLM_CACHE_FILE`.
 
 ---
 
 ## HTTP API
 
-### Основные endpoints
+### Main Endpoints
 
-- `POST /llm`
-- `POST /v1/chat/completions`
+* `POST /llm`
+* `POST /v1/chat/completions`
 
-Формат совместим с OpenAI Chat Completions API.
+The request format is compatible with the OpenAI Chat Completions API.
 
 ---
 
-## Запуск не из репозитория
+## Running Outside the Repository Directory
 
-Если CLI установлен в `$PATH`, но вы не в директории репозитория:
+If the CLI is installed in `$PATH`, but you are not currently inside the repository directory:
 
 ```bash
 export LLM_PROXY_PROJECT_DIR=/path/to/llm-proxy
 llm-proxy up
 ```
 
-Рекомендуется добавить переменную в shell-профиль.
+It is recommended to add this variable to your shell profile.
 
 ---
 
-## Установка CLI
+## Installing the CLI
 
 ```bash
 ./cli/llm-proxy install
 ```
 
-Проверка:
+Verify the installation:
 
 ```bash
 llm-proxy help
 ```
 
-Удаление:
+Uninstall:
 
 ```bash
 llm-proxy uninstall
@@ -297,23 +304,25 @@ llm-proxy uninstall
 
 ### compose.yaml not found
 
-Вы либо:
-- не в корне репозитория
-- либо не указали `LLM_PROXY_PROJECT_DIR`
+Either:
 
-### Порт занят
+* you are not in the repository root, or
+* `LLM_PROXY_PROJECT_DIR` is not set.
 
-Измените `LLM_PORT` в `<profile>.env`.
+### Port Already in Use
 
-### Контейнер сразу падает
+Change `LLM_PORT` in `<profile>.env`.
 
-Проверьте:
-- нет ли `WEB_CONCURRENCY`
-- нет ли `UVICORN_WORKERS`
-- нет ли `PROMETHEUS_MULTIPROC_DIR`
+### Container Exits Immediately
+
+Check that none of the following are set:
+
+* `WEB_CONCURRENCY`
+* `UVICORN_WORKERS`
+* `PROMETHEUS_MULTIPROC_DIR`
 
 ---
 
-## Лицензия
+## License
 
 MIT
