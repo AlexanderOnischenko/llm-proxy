@@ -10,10 +10,12 @@ services:
 
     ports:
       - "5678:5678"
+      - "${LLM_PORT}:${LLM_PORT}"
 
     environment:
       PYTHONUNBUFFERED: "1"
       WATCHFILES_FORCE_POLLING: "true"
+      LLM_PORT: "${LLM_PORT:-8002}"
 
     command:
       - sh

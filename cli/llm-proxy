@@ -55,6 +55,19 @@ resolve_dirs() {
   PROJECT_DIR_FILE="${CONFIG_DIR}/project_dir"
 }
 
+default_compose_service_soft() {
+  # Returns the primary service name (first under services:), or $LLM_PROXY_SERVICE if set.
+  local project_dir base_compose svc
+  project_dir="$(resolve_project_dir_soft 2>/dev/null || true)"
+  [[ -n "$project_dir" ]] || return 1
+  base_compose="${project_dir}/compose.yaml"
+  [[ -f "$base_compose" ]] || return 1
+
+  svc="$(detect_compose_service_name "$base_compose" 2>/dev/null || true)"
+  [[ -n "$svc" ]] || return 1
+  printf '%s\n' "$svc"
+}
+
 detect_compose_service_name() {
   local compose_file="$1"
 
@@ -415,11 +428,13 @@ edit
 edit-compose
 up
 start
+models
 run
 debug
 down
 stop
 status
+doctor
 logs
 delete
 rm
@@ -474,7 +489,7 @@ _llm_proxy_completions() {
   fi
 
   case "${prev}" in
-    use|switch|up|debug|down|status|delete|edit|edit-compose)
+    use|switch|up|debug|down|status|doctor|models|get-models|list-models|delete|edit|edit-compose)
       local profiles
       profiles="$("${COMP_WORDS[0]}" __complete profiles 2>/dev/null | tr '\n' ' ')"
       COMPREPLY=( $(compgen -W "$profiles" -- "$cur") )
@@ -509,7 +524,7 @@ _llm_proxy() {
       ;;
     target)
       case $line[1] in
-        use|switch|up|debug|down|status|logs|delete|edit|edit-compose)
+        use|switch|up|debug|down|status|doctor|models|get-models|list-models|logs|delete|edit|edit-compose)
           local -a profiles services
           profiles=($(_call_program profiles "$words[1]" __complete profiles))
           if [[ $line[1] == logs ]]; then
@@ -553,7 +568,7 @@ function __llm_proxy_complete_services
 end
 
 complete -c llm-proxy -n "__fish_use_subcommand" -a "(__llm_proxy_complete_commands)" -d "commands"
-complete -c llm-proxy -n "__fish_seen_subcommand_from use switch up debug down status logs delete edit edit-compose" -a "(__llm_proxy_complete_profiles)"
+complete -c llm-proxy -n "__fish_seen_subcommand_from use switch up debug down status doctor models get-models list-models logs delete edit edit-compose" -a "(__llm_proxy_complete_profiles)"
 complete -c llm-proxy -n "__fish_seen_subcommand_from logs" -a "(__llm_proxy_complete_services)"
 complete -c llm-proxy -n "__fish_seen_subcommand_from completion" -a "bash zsh fish"
 EOF
@@ -592,6 +607,18 @@ LLM_TOP_P=1.0
 LLM_MAX_TOKENS=50000
 LLM_VERBOSE=true
 LLM_TIMEOUT=300.0
+
+# SOCKS proxy (optional)
+LLM_SOCKS_ENABLED=false
+LLM_SOCKS_TYPE=socks5
+LLM_SOCKS_HOST=127.0.0.1
+LLM_SOCKS_PORT=1080
+# LLM_SOCKS_USERNAME=
+# LLM_SOCKS_PASSWORD=
+LLM_SOCKS_STRICT=false
+LLM_SOCKS_CONNECT_TIMEOUT=3
+LLM_SOCKS_READ_TIMEOUT=30
+# LLM_SOCKS_PROVIDER_OVERRIDES={"openai":"inherit"}
 
 # Concurrency / queue
 LLM_MAX_CONCURRENT=1
@@ -950,9 +977,460 @@ compose_status() {
   compose_cmd "$name" ps
 }
 
+service_port() {
+  local name="$1"
+  local compose_env port
+  compose_env="$(profile_compose_env_path "$name")"
+  port="$(envfile_get "$compose_env" "LLM_PORT" 2>/dev/null || true)"
+  if [[ -z "$port" ]]; then
+    port="8002"
+  fi
+  printf '%s\n' "$port"
+}
+
+_python_bin() {
+  if command -v python3 >/dev/null 2>&1; then
+    command -v python3
+    return 0
+  fi
+  if command -v python >/dev/null 2>&1; then
+    command -v python
+    return 0
+  fi
+  return 1
+}
+
+fetch_json() {
+  local url="$1"
+  shift || true
+  local -a curl_flags=()
+  if [[ $# -gt 0 ]]; then
+    curl_flags=("$@")
+  else
+    curl_flags=(-fsS)
+  fi
+  local fail_on_http=0
+  local flag
+  for flag in "${curl_flags[@]}"; do
+    if [[ "$flag" == "-f" || "$flag" == "--fail" || "$flag" == "--fail-with-body" || "$flag" == "-fsS" || "$flag" == *"-f"* ]]; then
+      fail_on_http=1
+      break
+    fi
+  done
+  if command -v curl >/dev/null 2>&1; then
+    curl "${curl_flags[@]}" "$url"
+    return $?
+  fi
+
+  local py
+  if ! py="$(_python_bin)"; then
+    return 1
+  fi
+
+  "$py" - "$url" "$fail_on_http" <<'PY'
+import sys
+import urllib.error
+import urllib.request
+
+url = sys.argv[1]
+fail_on_http = sys.argv[2] == "1"
+body = b""
+try:
+    with urllib.request.urlopen(url, timeout=5) as resp:
+        body = resp.read()
+except urllib.error.HTTPError as exc:
+    if fail_on_http:
+        raise
+    body = exc.read()
+sys.stdout.write(body.decode("utf-8"))
+PY
+}
+
+service_status() {
+  local name="$1"
+  local port url response py
+  port="$(service_port "$name")"
+  url="http://127.0.0.1:${port}/status"
+
+  if ! response="$(fetch_json "$url")"; then
+    warn "unable to reach service status at $url"
+    return 1
+  fi
+
+  if ! py="$(_python_bin)"; then
+    warn "python not found; unable to parse /status response"
+    return 1
+  fi
+
+  printf '\nService status:\n'
+  printf '%s' "$response" | "$py" <(cat <<'PY'
+import json
+import sys
+
+data = json.load(sys.stdin)
+socks = data.get("socks", {})
+config = socks.get("config", {})
+runtime = socks.get("runtime", {})
+
+print(f"  environment: {data.get('env')}")
+print(f"  socks.enabled: {config.get('enabled')}")
+print(f"  socks.type: {config.get('type')}")
+print(f"  socks.endpoint: {config.get('endpoint')}")
+print(f"  socks.strict: {config.get('strict')}")
+print(f"  socks.username_set: {config.get('username_set')}")
+print(f"  socks.runtime.status: {runtime.get('status')}")
+if runtime.get("error"):
+    print(f"  socks.runtime.error: {runtime.get('error')}")
+if runtime.get("last_checked_at"):
+    print(f"  socks.runtime.last_checked_at: {runtime.get('last_checked_at')}")
+PY
+)
+}
+
+service_doctor() {
+  local name="$1"
+  local port url response py
+  port="$(service_port "$name")"
+  url="http://127.0.0.1:${port}/doctor"
+
+  if command -v curl >/dev/null 2>&1; then
+    local curl_result http_status body
+    if ! curl_result="$(curl -sS -w '\n%{http_code}' "$url")"; then
+      warn "unable to reach service doctor at $url"
+      return 1
+    fi
+    http_status="${curl_result##*$'\n'}"
+    body="${curl_result%$'\n'*}"
+    response="$body"
+    if ! [[ "$http_status" =~ ^[0-9]{3}$ ]]; then
+      warn "unable to parse service doctor status from $url"
+      printf '%s\n' "$response"
+      return 1
+    fi
+    if ((http_status < 200 || http_status >= 300)); then
+      warn "service doctor at $url returned HTTP $http_status"
+      printf '%s\n' "$response"
+      return 1
+    fi
+  else
+    if ! py="$(_python_bin)"; then
+      warn "python not found; unable to reach service doctor at $url"
+      return 1
+    fi
+    if ! response="$("$py" - "$url" <<'PY'
+import sys
+import urllib.error
+import urllib.request
+
+url = sys.argv[1]
+status = 0
+body = b""
+try:
+    with urllib.request.urlopen(url, timeout=5) as resp:
+        status = resp.getcode() or 0
+        body = resp.read()
+except urllib.error.HTTPError as exc:
+    status = exc.code or 0
+    body = exc.read()
+sys.stdout.write(body.decode("utf-8"))
+sys.exit(0 if 200 <= status < 300 else 1)
+PY
+    )"; then
+      warn "service doctor at $url returned non-success status"
+      printf '%s\n' "$response"
+      return 1
+    fi
+  fi
+
+  if ! py="$(_python_bin)"; then
+    warn "python not found; unable to format /doctor response"
+    printf '%s\n' "$response"
+    return 0
+  fi
+
+  printf '\nService doctor:\n'
+  if ! printf '%s' "$response" | "$py" - <<'PY'; then
+import json
+import sys
+
+data = json.load(sys.stdin)
+print(json.dumps(data, indent=2))
+PY
+    printf '%s\n' "$response"
+  fi
+}
+
+service_running() {
+  local name="$1"
+  docker_available || return 1
+  local project_name="${PROG}-${name}"
+  local id
+  id="$(docker ps -q --filter "label=com.docker.compose.project=${project_name}" | head -n1 || true)"
+  [[ -n "$id" ]]
+}
+
+cmd_models() {
+  local name="$1"
+  shift || true
+
+  ensure_profile_prefilled "$name"
+  validate_runtime_env_or_die "$name"
+
+  if ! service_running "$name"; then
+    warn "profile '$name' is not running. Tip: $PROG up $name"
+  fi
+
+  local runtime_env
+  runtime_env="$(profile_runtime_env_path "$name")"
+
+  local want_json=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --json|--raw) want_json=1 ;;
+      -h|--help)
+        cat <<EOF
+Usage:
+  $PROG models [profile] [--json]
+
+Lists available upstream models using the profile's runtime env.
+Respects SOCKS settings from <profile>.llm.env (LLM_SOCKS_*).
+
+Format detection by LLM_API_BASE:
+  - OpenAI-compatible (.../v1, .../api/v1, .../openai/v1): expects .data[].id (GET /models)
+  - Gemini (generativelanguage.googleapis.com/v1beta): expects .models[].name (GET /models?key=...)
+EOF
+        return 0
+        ;;
+      *) die "unknown flag: $1 (use: $PROG models --help)" ;;
+    esac
+    shift
+  done
+
+local api_base
+  api_base="$(envfile_get "$runtime_env" "LLM_API_BASE" 2>/dev/null || true)"
+  [[ -n "$api_base" ]] || die "LLM_API_BASE is not set in $runtime_env"
+
+  local base format
+  base="${api_base%/}"
+  format="openai"
+  if [[ "$base" == *"generativelanguage.googleapis.com"*"/v1beta"* ]]; then
+    format="gemini"
+  fi
+
+  local api_key
+  api_key="$(envfile_get "$runtime_env" "LLM_API_KEY" 2>/dev/null || true)"
+
+  local url url_summary
+  url=""
+  url_summary=""
+  if [[ "$format" == "gemini" ]]; then
+    if [[ -z "$api_key" ]]; then
+      api_key="$(envfile_get "$runtime_env" "GEMINI_API_KEY" 2>/dev/null || true)"
+    fi
+    if [[ -z "$api_key" ]]; then
+      api_key="$(envfile_get "$runtime_env" "LLM_GEMINI_API_KEY" 2>/dev/null || true)"
+    fi
+    [[ -n "$api_key" ]] || die "Gemini requires an API key (set LLM_API_KEY in $runtime_env)"
+
+    if [[ "$base" == */models ]]; then
+      url="$base"
+    else
+      url="${base}/models"
+    fi
+
+    # key passed via query param for Gemini
+    if [[ "$url" == *"?"* ]]; then
+      url="${url}&key=${api_key}"
+    else
+      url="${url}?key=${api_key}"
+    fi
+
+    # Don't leak key in summary output.
+    url_summary="${url%%\?*}?key=***"
+  else
+    [[ -n "$api_key" ]] || die "LLM_API_KEY is not set in $runtime_env"
+    if [[ "$base" == */v1 || "$base" == */api/v1 || "$base" == */openai/v1 ]]; then
+      url="${base}/models"
+    else
+      url="${base}/v1/models"
+    fi
+    url_summary="$url"
+  fi
+
+
+  local socks_enabled socks_type socks_host socks_port socks_user socks_pass
+  socks_enabled="$(envfile_get "$runtime_env" "LLM_SOCKS_ENABLED" 2>/dev/null || true)"
+  socks_type="$(envfile_get "$runtime_env" "LLM_SOCKS_TYPE" 2>/dev/null || true)"
+  socks_host="$(envfile_get "$runtime_env" "LLM_SOCKS_HOST" 2>/dev/null || true)"
+  socks_port="$(envfile_get "$runtime_env" "LLM_SOCKS_PORT" 2>/dev/null || true)"
+  socks_user="$(envfile_get "$runtime_env" "LLM_SOCKS_USERNAME" 2>/dev/null || true)"
+  socks_pass="$(envfile_get "$runtime_env" "LLM_SOCKS_PASSWORD" 2>/dev/null || true)"
+
+  local socks_on="off"
+  local socks_endpoint="-"
+  local socks_host_effective="$socks_host"
+  local socks_port_effective="$socks_port"
+
+  local -a curl_args=(-sS -w $'\n%{http_code}')
+  case "$socks_enabled" in
+    1|true|TRUE|yes|YES|on|ON)
+      socks_on="on"
+      [[ -n "$socks_host_effective" ]] || socks_host_effective="127.0.0.1"
+      [[ -n "$socks_port_effective" ]] || socks_port_effective="1080"
+      # контейнерный host.docker.internal на хосте заменяем на localhost
+      if [[ "$socks_host_effective" == "host.docker.internal" ]]; then
+        socks_host_effective="127.0.0.1"
+      fi
+      case "${socks_type:-socks5}" in
+        socks5|socks5h) curl_args+=(--socks5-hostname "${socks_host_effective}:${socks_port_effective}") ;;
+        socks4|socks4a) curl_args+=(--socks4a "${socks_host_effective}:${socks_port_effective}") ;;
+        *) die "unknown LLM_SOCKS_TYPE=${socks_type} (supported: socks5, socks4)" ;;
+      esac
+      if [[ -n "$socks_user" || -n "$socks_pass" ]]; then
+        curl_args+=(--proxy-user "${socks_user}:${socks_pass}")
+      fi
+      ;;
+  esac
+
+  # Summary in stderr; keep stdout clean for piping.
+  printf '%s: models (profile=%s format=%s socks=%s endpoint=%s url=%s)\n' \
+    "$PROG" "$name" "$format" "$socks_on" "$socks_endpoint" "$url_summary" >&2
+
+  curl_args+=(-H "Accept: application/json")
+  if [[ "$format" == "openai" ]]; then
+    curl_args+=(-H "Authorization: Bearer ${api_key}")
+  fi
+  curl_args+=("$url")
+
+  local result http_status body
+  if ! result="$(curl "${curl_args[@]}")"; then
+    die "failed to fetch models from upstream: $url"
+  fi
+
+  http_status="${result##*$'\n'}"
+  body="${result%$'\n'*}"
+
+  if ! [[ "$http_status" =~ ^[0-9]{3}$ ]]; then
+    warn "unable to parse upstream HTTP status"
+    printf '%s\n' "$body" >&2
+  fi
+
+  if (( http_status < 200 || http_status >= 300 )); then
+    warn "upstream returned HTTP $http_status"
+    printf '%s\n' "$body" >&2
+    return 1
+  fi
+
+  if (( want_json )); then
+    printf '%s\n' "$body"
+    return 0
+  fi
+
+  local py
+  if ! py="$(_python_bin)"; then
+    warn "python not found; printing raw JSON"
+    printf '%s\n' "$body"
+    return 0
+  fi
+
+  if [[ "$format" == "gemini" ]]; then
+    if ! "$py" -c '
+import json, sys
+raw = sys.stdin.read()
+try:
+    data = json.loads(raw)
+except Exception:
+    print("invalid JSON from upstream", file=sys.stderr)
+    raise
+
+err = data.get("error")
+if err:
+    msg = err.get("message") if isinstance(err, dict) else str(err)
+    if msg:
+        print(msg, file=sys.stderr)
+    raise SystemExit(1)
+
+models = data.get("models")
+if not isinstance(models, list):
+    print("unexpected response: no models[]", file=sys.stderr)
+    raise SystemExit(1)
+
+count = 0
+for m in models:
+    if isinstance(m, dict):
+        name = m.get("name")
+        if name:
+            print(name)
+            count += 1
+print(f"models: {count}", file=sys.stderr)
+' <<<"$body"; then
+      warn "failed to parse Gemini models response"
+      printf '%s\n' "$body" >&2
+      return 1
+    fi
+  else
+    if ! "$py" -c '
+import json, sys
+raw = sys.stdin.read()
+try:
+    data = json.loads(raw)
+except Exception:
+    print("invalid JSON from upstream", file=sys.stderr)
+    raise
+
+err = data.get("error")
+if err:
+    msg = err.get("message") if isinstance(err, dict) else str(err)
+    if msg:
+        print(msg, file=sys.stderr)
+    raise SystemExit(1)
+
+items = data.get("data")
+if not isinstance(items, list):
+    print("unexpected response: no data[]", file=sys.stderr)
+    raise SystemExit(1)
+
+count = 0
+for it in items:
+    if isinstance(it, dict):
+        mid = it.get("id")
+        if mid:
+            print(mid)
+            count += 1
+print(f"models: {count}", file=sys.stderr)
+' <<<"$body"; then
+      warn "failed to parse OpenAI models response"
+      printf '%s\n' "$body" >&2
+      return 1
+    fi
+  fi
+}
+
 compose_logs() {
   local name="$1"; shift || true
-  local services=("$@")
+
+  # Capture service args without creating an "empty array expansion" footgun under `set -u`.
+  local -a services=()
+  if [[ $# -gt 0 ]]; then
+    services=("$@")
+  fi
+
+  # Drop empty service names (defensive).
+  if [[ -n "${services[0]:-}" ]]; then
+    local -a filtered=()
+    local s
+    for s in "${services[@]}"; do
+      [[ -n "$s" ]] && filtered+=("$s")
+    done
+    services=("${filtered[@]}")
+  fi
+
+  # Default to the primary service when none is specified.
+  if [[ -z "${services[0]:-}" ]]; then
+    local default_svc=""
+    default_svc="$(default_compose_service_soft 2>/dev/null || true)"
+    [[ -n "$default_svc" ]] && services=("$default_svc")
+  fi
 
   if can_compose_operate "$name"; then
     local project_dir compose_env override
@@ -967,13 +1445,23 @@ compose_logs() {
         fi
       fi
 
-      docker compose \
-        --project-directory "$project_dir" \
-        -f "${project_dir}/compose.yaml" \
-        "${compose_args[@]}" \
-        --env-file "$compose_env" \
-        -p "${PROG}-${name}" \
-        logs -f --tail=200 "${services[@]}"
+      if [[ -n "${services[0]:-}" ]]; then
+        docker compose \
+          --project-directory "$project_dir" \
+          -f "${project_dir}/compose.yaml" \
+          "${compose_args[@]}" \
+          --env-file "$compose_env" \
+          -p "${PROG}-${name}" \
+          logs -f --tail=200 "${services[@]}"
+      else
+        docker compose \
+          --project-directory "$project_dir" \
+          -f "${project_dir}/compose.yaml" \
+          "${compose_args[@]}" \
+          --env-file "$compose_env" \
+          -p "${PROG}-${name}" \
+          logs -f --tail=200
+      fi
       return $?
     fi
   fi
@@ -983,16 +1471,27 @@ compose_logs() {
   local -a containers=()
   project_name="${PROG}-${name}"
 
-  if [[ "${#services[@]}" -gt 0 ]]; then
+  if [[ -n "${services[0]:-}" ]]; then
     local svc list
     for svc in "${services[@]}"; do
-      list="$(docker ps -aq --filter "label=com.docker.compose.project=${project_name}" --filter "label=com.docker.compose.service=${svc}" || true)"
+      list="$(docker ps -aq \
+        --filter "label=com.docker.compose.project=${project_name}" \
+        --filter "label=com.docker.compose.service=${svc}" || true)"
       if [[ -n "$list" ]]; then
         containers+=($list)
       fi
     done
   else
-    mapfile -t containers < <(docker ps -aq --filter "label=com.docker.compose.project=${project_name}" || true)
+    # Best-effort: prefer the default service container if we can detect it.
+    local default_svc=""
+    default_svc="$(default_compose_service_soft 2>/dev/null || true)"
+    if [[ -n "$default_svc" ]]; then
+      mapfile -t containers < <(docker ps -aq \
+        --filter "label=com.docker.compose.project=${project_name}" \
+        --filter "label=com.docker.compose.service=${default_svc}" || true)
+    else
+      mapfile -t containers < <(docker ps -aq --filter "label=com.docker.compose.project=${project_name}" || true)
+    fi
   fi
 
   if [[ "${#containers[@]}" -eq 0 ]]; then
@@ -1041,7 +1540,9 @@ Usage:
   $PROG up [name]            # start active or provided profile (compose up -d --build)
   $PROG debug [name]         # start in debug mode (compose-debug.yaml + debugpy attach)
   $PROG down [name]          # stop active or provided profile (compose down)
+  $PROG models [name]        # list available upstream models
   $PROG status [name]
+  $PROG doctor [name]
   $PROG logs [name]
   $PROG delete <name> [--yes]
 
@@ -1305,30 +1806,82 @@ main() {
         name="$(sanitize_profile_name "$name")" || die "invalid profile name (use letters/digits/._-; must not end with .llm)"
       fi
       compose_status "$name"
+      service_status "$name"
+      ;;
+    doctor)
+      local name="${1:-}"
+      if [[ -z "$name" ]]; then
+        name="$(get_active_profile)"; [[ -n "$name" ]] || die "no active profile; use: $PROG doctor <name>"
+      else
+        name="$(sanitize_profile_name "$name")" || die "invalid profile name (use letters/digits/._-; must not end with .llm)"
+      fi
+      service_doctor "$name"
+      ;;
+      models|get-models|list-models)
+      local first="${1:-}"
+      local name=""
+      if [[ -n "$first" ]]; then
+        local candidate=""
+        if candidate="$(sanitize_profile_name "$first" 2>/dev/null)" && profile_exists "$candidate"; then
+          name="$candidate"
+          shift || true
+        else
+          name="$(get_active_profile)"; [[ -n "$name" ]] || die "no active profile; use: $PROG use <name>"
+        fi
+      else
+        name="$(get_active_profile)"; [[ -n "$name" ]] || die "no active profile; use: $PROG use <name>"
+      fi
+      cmd_models "$name" "$@"
       ;;
     logs)
-      local name="${1:-}"
+      local first="${1:-}"
       shift || true
-      local services=("$@")
-
-      if [[ -z "$name" ]]; then
-        name="$(get_active_profile)"; [[ -n "$name" ]] || die "no active profile; use: $PROG logs <name>"
+      # Remaining args are services (optional).
+      local -a services=()
+      if [[ $# -gt 0 ]]; then
+        services=("$@")
+      fi
+      local name=""
+      if [[ -z "$first" ]]; then
+        name="$(get_active_profile)"; [[ -n "$name" ]] || die "no active profile; use: $PROG use <name> (then: $PROG logs)"
       else
-        local candidate; candidate="$(sanitize_profile_name "$name")" || die "invalid profile name (use letters/digits/._-; must not end with .llm)"
-        if profile_exists "$candidate"; then
-          name="$candidate"
-        else
-          local active; active="$(get_active_profile)"
-          if [[ -n "$active" ]]; then
-            services=("$candidate" "${services[@]}")
-            name="$active"
+        # If `first` is an existing profile -> use it; otherwise treat it as a service name under active profile.
+        local candidate=""
+        if candidate="$(sanitize_profile_name "$first" 2>/dev/null)"; then
+          if profile_exists "$candidate"; then
+            name="$candidate"
           else
-            die "no active profile; use: $PROG logs <profile> [service...]"
+            name="$(get_active_profile)"; [[ -n "$name" ]] || die "no active profile; use: $PROG logs <profile> [service...]"
+            local -a new_services=("$first")
+            if [[ -n "${services[0]:-}" ]]; then
+              new_services+=("${services[@]}")
+            fi
+            services=("${new_services[@]}")
           fi
+        else
+          name="$(get_active_profile)"; [[ -n "$name" ]] || die "no active profile; use: $PROG logs <profile> [service...]"
+          local -a new_services=("$first")
+          if [[ -n "${services[0]:-}" ]]; then
+            new_services+=("${services[@]}")
+          fi
+          services=("${new_services[@]}")
         fi
       fi
-
-      compose_logs "$name" "${services[@]}"
+      # Drop empty service names (defensive).
+      if [[ -n "${services[0]:-}" ]]; then
+        local -a filtered=()
+        local s
+        for s in "${services[@]}"; do
+          [[ -n "$s" ]] && filtered+=("$s")
+        done
+        services=("${filtered[@]}")
+      fi
+      # Call without expanding an empty array.
+      if [[ -n "${services[0]:-}" ]]; then
+        compose_logs "$name" "${services[@]}"
+      else
+        compose_logs "$name"
+      fi
       ;;
     delete|rm|remove)
       local name="${1:-}"; [[ -n "$name" ]] || die "usage: $PROG delete <name> [--yes]"

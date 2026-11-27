@@ -30,7 +30,7 @@ def test_deps_pass_same_cache_to_llm_and_provider(tmp_path, monkeypatch):
         return object()
 
     class FakeProvider:
-        def __init__(self, settings, *, cache=None):
+        def __init__(self, settings, *, cache=None, transport_factory=None):
             captured["provider_cache"] = cache
 
     monkeypatch.setattr(llm_deps, "create_custom_llm", fake_create_custom_llm)
@@ -54,6 +54,15 @@ def test_deps_pass_same_cache_to_llm_and_provider(tmp_path, monkeypatch):
         llm_max_tokens=16,
         llm_top_p=1.0,
         llm_timeout=30,
+        llm_socks_enabled=False,
+        llm_socks_type="socks5",
+        llm_socks_host="127.0.0.1",
+        llm_socks_port=1080,
+        llm_socks_username=None,
+        llm_socks_password=None,
+        llm_socks_connect_timeout=3.0,
+        llm_socks_read_timeout=30.0,
+        llm_socks_provider_overrides={},
 
         # Required by build_chat_queue in case it is called
         llm_priority_limits_map={},
